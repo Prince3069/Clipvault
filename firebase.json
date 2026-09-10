@@ -1,0 +1,65 @@
+{
+  "functions": {
+    "source": "functions",
+    "runtime": "nodejs20",
+    "ignore": [
+      "node_modules",
+      ".git",
+      "firebase-debug.log",
+      "firebase-debug.*.log",
+      "*.local"
+    ]
+  },
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "social-downloader-2d02b",
+          "appId": "1:304792745260:android:c862df45e9fc2f81d8a889",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "social-downloader-2d02b",
+          "configurations": {
+            "android": "1:304792745260:android:c862df45e9fc2f81d8a889",
+            "ios": "1:304792745260:ios:6978eecb08062e9bd8a889",
+            "macos": "1:304792745260:ios:6978eecb08062e9bd8a889",
+            "web": "1:304792745260:web:4cf54ae2d847b0c7d8a889",
+            "windows": "1:304792745260:web:2e62116661a20f4dd8a889"
+          }
+        }
+      }
+    }
+  },
+  "hosting": {
+    "public": "build/web",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
+    "rewrites": [
+      {
+        "source": "**",
+        "destination": "/index.html"
+      }
+    ]
+  },
+  "emulators": {
+    "functions": {
+      "port": 5001
+    },
+    "firestore": {
+      "port": 8080
+    },
+    "hosting": {
+      "port": 5000
+    },
+    "ui": {
+      "enabled": true
+    },
+    "singleProjectMode": true
+  }
+}

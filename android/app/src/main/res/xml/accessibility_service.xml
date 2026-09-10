@@ -1,0 +1,9 @@
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowContentChanged|typeWindowStateChanged|typeViewClicked"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagReportViewIds"
+    android:canRetrieveWindowContent="true"
+    android:notificationTimeout="300"
+    android:packageNames="com.whatsapp,com.whatsapp.w4b,com.instagram.android,com.facebook.katana,com.zhiliaoapp.musically,com.twitter.android"
+    android:description="@string/accessibility_service_description"
+    android:settingsActivity="com.example.all_social_downloader.MainActivity" />
