@@ -79,7 +79,7 @@ class DownloadService {
         );
       }
 
-      // Step 2: Move from temp cache → Download/ClipVaults/[Platform]/ via MediaStore
+      // Step 2: Move from temp cache → Download/MediaNest/[Platform]/ via MediaStore
       // This is Google Play's approved method (no MANAGE_EXTERNAL_STORAGE)
       onStatus?.call('💾 Saving...');
       final finalPath = await _moveToMediaStore(
@@ -107,12 +107,12 @@ class DownloadService {
   // Save to app's private temp folder first (zero permissions needed)
   Future<String> _getTempPath(String fileName) async {
     final temp = await getTemporaryDirectory();
-    final dir = Directory('${temp.path}/clipvaults_temp');
+    final dir = Directory('${temp.path}/MediaNest_temp');
     await dir.create(recursive: true);
     return '${dir.path}/$fileName';
   }
 
-  // Move completed file from temp to Download/ClipVaults/[Platform]/ via MediaStore.
+  // Move completed file from temp to Download/MediaNest/[Platform]/ via MediaStore.
   // Uses MainActivity.saveToMediaStore which calls Android's MediaStore API.
   // This is the Google Play approved method — no MANAGE_EXTERNAL_STORAGE needed.
   Future<String> _moveToMediaStore(

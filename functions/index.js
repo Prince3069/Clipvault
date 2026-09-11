@@ -19,7 +19,7 @@ const admin = require("firebase-admin");
 const express = require("express");
 const cors = require("cors");
 
-const {requireAuth, attachPremiumStatus, checkAndConsumeCredit} = require("./lib/middleware");
+const {requireAuth, attachPremiumStatus, checkAndConsumeCredit, checkAndConsumeMonthlyCredit} = require("./lib/middleware");
 const {chatComplete} = require("./lib/openai");
 const {runRepurposeAction, SUPPORTED_ACTIONS} = require("./lib/repurpose");
 const {
@@ -30,7 +30,7 @@ const {
   CREDIT_PACKS,
   TOPUP_BUDGET_FRACTION,
 } = require("./lib/budget");
-const {verifyAndConsumePurchase} = require("./lib/playVerify");
+const {verifyAndConsumePurchase, verifySubscriptionPurchase} = require("./lib/playVerify");
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -58,7 +58,7 @@ const ALL_SECRETS = [openaiKey, anthropicKey, deepseekKey, replicateKey, deepgra
 // dollars spent, at 30% of what they actually paid, via lib/budget.js. See
 // the /getAICredits route for how remaining budget is reported to the app.
 const LIMITS = {
-  translateText: {free: 1},
+  translateText: {free: 1}, // per calendar MONTH, not per day — see checkAndConsumeMonthlyCredit
   processRepurposeAction: {free: 0}, // Repurpose Studio is fully premium-gated
 };
 
@@ -91,14 +91,18 @@ app.get("/getAICredits", requireAuth, attachPremiumStatus, async (req, res) => {
     }
 
     const today = new Date().toISOString().slice(0, 10);
+    const month = new Date().toISOString().slice(0, 7);
     const features = Object.keys(LIMITS);
     const used = {};
     for (const feature of features) {
+      // translateText's free tier is monthly ("1 free, then wait until next
+      // month") — everything else in LIMITS still resets daily.
+      const periodKey = feature === "translateText" ? month : today;
       const doc = await db
         .collection("users")
         .doc(req.user.uid)
         .collection("aiCredits")
-        .doc(`${feature}_${today}`)
+        .doc(`${feature}_${periodKey}`)
         .get();
       used[feature] = doc.exists ? doc.data().count || 0 : 0;
     }
@@ -106,7 +110,7 @@ app.get("/getAICredits", requireAuth, attachPremiumStatus, async (req, res) => {
     for (const feature of features) {
       limits[feature] = LIMITS[feature].free;
     }
-    res.json({date: today, used, limits, isPremium: false});
+    res.json({date: today, month, used, limits, isPremium: false});
   } catch (e) {
     console.error("getAICredits error:", e);
     res.status(500).json({error: "Could not load AI credit usage"});
@@ -138,10 +142,10 @@ app.post(
           });
         }
       } else {
-        const allowed = await checkAndConsumeCredit(req.user.uid, "translateText", LIMITS.translateText.free);
+        const allowed = await checkAndConsumeMonthlyCredit(req.user.uid, "translateText", LIMITS.translateText.free);
         if (!allowed) {
           return res.status(429).json({
-            error: "Free daily translation limit reached — upgrade to Pro for more",
+            error: "Your free translation for this month is used — upgrade to Pro for unlimited, or wait until next month for another free one.",
           });
         }
       }
@@ -172,13 +176,18 @@ app.post(
 );
 
 // ─── Detect language ─────────────────────────────────────────────────────
-// Free for everyone — tiny, near-zero-cost call (short reply, no real
-// translation work), not worth metering separately.
+// Pro-only, enforced here — a client-side-only gate can always be bypassed
+// by anyone calling this endpoint directly.
 app.post(
   "/detectLanguage",
   requireAuth,
+  attachPremiumStatus,
   async (req, res) => {
     try {
+      if (!req.isPremium) {
+        return res.status(402).json({error: "Auto-detect language is a Pro feature"});
+      }
+
       const {text} = req.body;
       if (!text) return res.status(400).json({error: "text is required"});
 
@@ -248,7 +257,7 @@ app.post(
 // the real Play purchase token. This is the ONLY place credits get added
 // to a top-up balance — everything here is designed so a person can't get
 // credited without Google Play itself confirming a real purchase happened.
-app.post("/redeemCreditPurchase", requireAuth, async (req, res) => {
+app.post("/redeemCreditPurchase", requireAuth, attachPremiumStatus, async (req, res) => {
   try {
     const {productId, purchaseToken} = req.body;
     if (!productId || !purchaseToken) {
@@ -258,6 +267,21 @@ app.post("/redeemCreditPurchase", requireAuth, async (req, res) => {
     const pack = CREDIT_PACKS[productId];
     if (!pack) {
       return res.status(400).json({error: "Unknown credit pack productId"});
+    }
+
+    // Credits only do anything for a Pro subscriber — translateText's free
+    // tier doesn't consult the budget/credit system at all. The client
+    // already blocks starting this purchase for a non-Pro user; this is
+    // the real enforcement, since a client-side check alone can always be
+    // bypassed. If this ever fires for real, the person has already paid
+    // Google — direct them to Play Store's own refund flow, since this
+    // server deliberately won't credit a purchase it can't account for.
+    if (!req.isPremium) {
+      return res.status(403).json({
+        error: "Credits require an active Pro subscription. If you were " +
+          "charged, request a refund from Google Play — Play Store → Menu " +
+          "→ Payments & subscriptions → Order history.",
+      });
     }
 
     // Idempotency: the exact same purchase token can never be redeemed
@@ -296,6 +320,71 @@ app.post("/redeemCreditPurchase", requireAuth, async (req, res) => {
   } catch (e) {
     console.error("redeemCreditPurchase error:", e);
     res.status(500).json({error: "Could not redeem credit purchase"});
+  }
+});
+
+// ─── Verify and activate a subscription purchase ─────────────────────────
+// This is the piece that was missing entirely: the client used to write
+// premiumExpiry straight to Firestore based on nothing but its own local
+// purchase callback — Firestore security rules were the only thing
+// standing between a modified client and free premium forever, and rules
+// alone are the wrong place to enforce this. The server now verifies the
+// subscription directly with Google Play and uses GOOGLE'S OWN expiry
+// time, not anything the client claims, before writing anything.
+app.post("/verifySubscriptionPurchase", requireAuth, async (req, res) => {
+  try {
+    const {productId, purchaseToken} = req.body;
+    if (!productId || !purchaseToken) {
+      return res.status(400).json({error: "productId and purchaseToken are required"});
+    }
+    if (productId !== "saveit_premium_monthly" && productId !== "saveit_premium_annual") {
+      return res.status(400).json({error: "Unknown subscription productId"});
+    }
+
+    // Idempotency: the same token can't re-trigger this repeatedly, same
+    // pattern as /redeemCreditPurchase.
+    const activationRef = db.collection("subscriptionActivations").doc(purchaseToken);
+    const already = await activationRef.get();
+    if (already.exists) {
+      // Not an error — the client legitimately calls this again on every
+      // app start to keep itself in sync. Just return the stored result.
+      const data = already.data();
+      return res.json({success: true, expiryTime: data.expiryTime, planId: data.planId});
+    }
+
+    const verification = await verifySubscriptionPurchase(productId, purchaseToken);
+    if (!verification.valid) {
+      console.error("verifySubscriptionPurchase: verification failed:", verification.reason);
+      return res.status(402).json({error: "Subscription could not be verified with Google Play"});
+    }
+
+    const planId = productId === "saveit_premium_monthly" ? "monthly" : "annual";
+    const expiryTime = verification.expiryTime;
+
+    // The ONLY place premiumExpiry/planId get written now — server-side,
+    // using the Admin SDK, after Google itself confirmed the subscription
+    // is real and active. The client no longer writes this field at all.
+    await db.collection("users").doc(req.user.uid).set(
+      {
+        premiumExpiry: admin.firestore.Timestamp.fromDate(expiryTime),
+        planId,
+        lastVerifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      {merge: true},
+    );
+
+    await activationRef.set({
+      uid: req.user.uid,
+      productId,
+      planId,
+      expiryTime: expiryTime.toISOString(),
+      verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    res.json({success: true, expiryTime: expiryTime.toISOString(), planId});
+  } catch (e) {
+    console.error("verifySubscriptionPurchase error:", e);
+    res.status(500).json({error: "Could not verify subscription purchase"});
   }
 });
 

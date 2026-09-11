@@ -334,7 +334,7 @@ class CloudVaultService {
 
       await downloadTask.whenComplete(() => null);
 
-      // Move to MediaStore (Download/ClipVaults/Cloud)
+      // Move to MediaStore (Download/MediaNest/Cloud)
       onStatus?.call('💾 Saving to device...');
       final platform = 'cloud';
       final finalPath = await _moveToMediaStore(
@@ -443,22 +443,15 @@ class CloudVaultService {
     }
   }
 
-  /// Update premium expiry (and plan) for user. planId ('monthly'/'annual')
-  /// lets the Cloud Functions backend look up what this user actually paid,
-  /// which is what the per-user AI budget cap is based on — see
-  /// functions/lib/budget.js.
-  Future<void> updatePremiumExpiry(DateTime expiry, {String? planId}) async {
-    if (_uid.isEmpty) return;
-    try {
-      await _firestore.collection('users').doc(_uid).set({
-        'premiumExpiry': Timestamp.fromDate(expiry),
-        if (planId != null) 'planId': planId,
-        'lastUpdated': Timestamp.now(),
-      }, SetOptions(merge: true));
-    } catch (e) {
-      print('Update premium expiry error: $e');
-    }
-  }
+  // NOTE: updatePremiumExpiry() used to live here, letting the client write
+  // premiumExpiry/planId straight to Firestore based on its own local
+  // purchase callback. That was a real security hole — a modified client
+  // (or a Frida/Xposed hook faking a successful purchase) could grant
+  // itself premium forever without ever paying. It's been removed. The
+  // ONLY place premiumExpiry/planId get written now is server-side, in
+  // functions/index.js's /verifySubscriptionPurchase, after Google Play
+  // itself has confirmed the purchase is real. If you're tempted to bring
+  // this back for convenience, don't — go through the server endpoint.
 
   // ─── Helper methods ──────────────────────────────────────────────────────
 

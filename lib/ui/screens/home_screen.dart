@@ -53,6 +53,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _readClipboard();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        Provider.of<PremiumProvider>(context, listen: false)
+            .refreshCreditBalance();
+      }
+    });
   }
 
   @override
@@ -139,9 +145,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       );
 
       if (!mounted) return;
-      final item = downloads.downloads.isNotEmpty
-          ? downloads.downloads.last
-          : null;
+      final item =
+          downloads.downloads.isNotEmpty ? downloads.downloads.last : null;
       if (item?.status == DownloadStatus.completed) {
         setState(() {
           _progress = 1;
@@ -175,7 +180,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     try {
       await _nativeChannel.invokeMethod<void>('shareText', <String, dynamic>{
         'text': text,
-        'title': 'Share with ClipVault',
+        'title': 'Share with MediaNest',
       });
     } catch (_) {
       await Clipboard.setData(ClipboardData(text: text));
@@ -329,7 +334,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             child: ClipRRect(
               borderRadius: BorderRadius.circular(16),
               child: Image.asset(
-                'assets/branding/clipvault_logo.png',
+                'assets/branding/MediaNest_logo.png',
                 fit: BoxFit.contain,
                 errorBuilder: (context, error, stackTrace) {
                   return Image.asset(
@@ -353,7 +358,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'ClipVault',
+                  'MediaNest',
                   style: TextStyle(
                     color: _ink,
                     fontSize: 22,
@@ -372,7 +377,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             builder: (_, premium, __) => GestureDetector(
               onTap: () => _open(const PremiumScreen()),
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 8),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 11, vertical: 8),
                 decoration: BoxDecoration(
                   color: premium.isPremium ? const Color(0xFFE8E2FF) : _ink,
                   borderRadius: BorderRadius.circular(14),
@@ -444,7 +450,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 ),
               ),
               const Spacer(),
-              const Icon(Icons.wifi_tethering_rounded, color: _violet, size: 18),
+              const Icon(Icons.wifi_tethering_rounded,
+                  color: _violet, size: 18),
               const SizedBox(width: 5),
               const Text(
                 'Ready',
@@ -465,7 +472,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           ),
           const SizedBox(height: 9),
           const Text(
-              'Download once. Organize it. Repurpose it everywhere.',
+            'Download once. Organize it. Repurpose it everywhere.',
             style: TextStyle(color: _muted, fontSize: 13, height: 1.35),
           ),
           const SizedBox(height: 18),
@@ -501,7 +508,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                       _urlController.clear();
                       setState(() {});
                     },
-                    icon: const Icon(Icons.close_rounded, color: _muted, size: 18),
+                    icon: const Icon(Icons.close_rounded,
+                        color: _muted, size: 18),
                   ),
               ],
             ),
@@ -512,15 +520,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               onTap: _download,
               child: Row(
                 children: [
-                  const Icon(Icons.content_paste_rounded, color: _violet, size: 15),
+                  const Icon(Icons.content_paste_rounded,
+                      color: _violet, size: 15),
                   const SizedBox(width: 6),
                   Expanded(
                     child: Text(
                       'Clipboard link detected · tap to capture',
-                      style: TextStyle(color: _violet.withValues(alpha: 0.9), fontSize: 11),
+                      style: TextStyle(
+                          color: _violet.withValues(alpha: 0.9), fontSize: 11),
                     ),
                   ),
-                  const Icon(Icons.arrow_forward_rounded, color: _violet, size: 15),
+                  const Icon(Icons.arrow_forward_rounded,
+                      color: _violet, size: 15),
                 ],
               ),
             ),
@@ -532,17 +543,21 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 child: FilledButton.icon(
                   onPressed: _isProcessing ? null : _download,
                   icon: Icon(
-                    _isProcessing ? Icons.hourglass_top_rounded : Icons.download_rounded,
+                    _isProcessing
+                        ? Icons.hourglass_top_rounded
+                        : Icons.download_rounded,
                     size: 18,
                   ),
-                  label: Text(_isProcessing ? 'Downloading…' : 'Download content'),
+                  label:
+                      Text(_isProcessing ? 'Downloading…' : 'Download content'),
                   style: FilledButton.styleFrom(
                     backgroundColor: _violet,
                     foregroundColor: Colors.white,
                     disabledBackgroundColor: _violet.withValues(alpha: 0.35),
                     disabledForegroundColor: Colors.white70,
                     padding: const EdgeInsets.symmetric(vertical: 14),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14)),
                   ),
                 ),
               ),
@@ -558,7 +573,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     borderRadius: BorderRadius.circular(14),
                     border: Border.all(color: _violet.withValues(alpha: 0.18)),
                   ),
-                  child: const Icon(Icons.share_rounded, color: _violet, size: 20),
+                  child:
+                      const Icon(Icons.share_rounded, color: _violet, size: 20),
                 ),
               ),
             ],
@@ -589,7 +605,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   color: _violet.withValues(alpha: 0.10),
                   borderRadius: BorderRadius.circular(12),
                 ),
-                child: const Icon(Icons.downloading_rounded, color: _violet, size: 19),
+                child: const Icon(Icons.downloading_rounded,
+                    color: _violet, size: 19),
               ),
               const SizedBox(width: 10),
               Expanded(
@@ -597,12 +614,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   _status,
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(color: _ink, fontWeight: FontWeight.w700, fontSize: 13),
+                  style: const TextStyle(
+                      color: _ink, fontWeight: FontWeight.w700, fontSize: 13),
                 ),
               ),
               Text(
                 '${(value * 100).round()}%',
-                style: const TextStyle(color: _violet, fontWeight: FontWeight.w900, fontSize: 13),
+                style: const TextStyle(
+                    color: _violet, fontWeight: FontWeight.w900, fontSize: 13),
               ),
             ],
           ),
@@ -632,11 +651,28 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         final captured = downloads.downloads
             .where((item) => item.status == DownloadStatus.completed)
             .length;
+
+        // Same logic as the translator screen's badge — premium shows real
+        // USD-budget credits, free shows the monthly free-translation
+        // allowance, since those are different things under the hood.
+        final String creditsValue;
+        if (premium.isPremium) {
+          final credits = premium.remainingCredits;
+          creditsValue = credits == null ? '…' : '$credits';
+        } else {
+          final remaining = premium.freeTranslationsRemaining;
+          creditsValue = remaining == null ? '…' : '$remaining';
+        }
+
         return Row(
           children: [
-            Expanded(child: _signal('$captured', 'Captured', Icons.south_rounded, _violet)),
+            Expanded(
+                child: _signal(
+                    '$captured', 'Captured', Icons.south_rounded, _violet)),
             const SizedBox(width: 9),
-            Expanded(child: _signal('${media.allMedia.length}', 'In library', Icons.grid_view_rounded, _cyan)),
+            Expanded(
+                child: _signal('${media.allMedia.length}', 'In library',
+                    Icons.grid_view_rounded, _cyan)),
             const SizedBox(width: 9),
             Expanded(
               child: _signal(
@@ -645,6 +681,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 Icons.bolt_rounded,
                 _lime,
                 dark: true,
+              ),
+            ),
+            const SizedBox(width: 9),
+            Expanded(
+              child: _signal(
+                creditsValue,
+                premium.isPremium ? 'AI credits' : 'Free AI left',
+                Icons.auto_awesome_rounded,
+                _violet,
               ),
             ),
           ],
@@ -822,14 +867,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             Text(subtitle,
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                    color: _muted, fontSize: 10, height: 1.25)),
+                style:
+                    const TextStyle(color: _muted, fontSize: 10, height: 1.25)),
             const SizedBox(height: 12),
             Row(
               children: [
                 Text('Open',
                     style: TextStyle(
-                        color: color, fontSize: 10, fontWeight: FontWeight.w800)),
+                        color: color,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w800)),
                 const Spacer(),
                 Icon(Icons.arrow_outward_rounded, color: color, size: 16),
               ],
@@ -872,8 +919,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                           fontSize: 15,
                           fontWeight: FontWeight.w800)),
                   SizedBox(height: 4),
-                  Text(
-                      'Catch WhatsApp moments before they disappear.',
+                  Text('Catch WhatsApp moments before they disappear.',
                       style: TextStyle(
                           color: Colors.white70, fontSize: 11, height: 1.3)),
                 ],
@@ -893,8 +939,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _buildSectionHeading('Live workspace',
-                'Your latest captures and background jobs'),
+            _buildSectionHeading(
+                'Live workspace', 'Your latest captures and background jobs'),
             const SizedBox(height: 12),
             if (items.isEmpty)
               _emptyActivity()
@@ -942,8 +988,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   Widget _activityItem(DownloadItem item) {
     final active = item.status == DownloadStatus.downloading;
     final failed = item.status == DownloadStatus.failed;
-    final color = failed ? const Color(0xFFB83A59) : active ? _violet : _cyan;
-    final label = active ? 'Working' : failed ? 'Needs attention' : 'Captured';
+    final color = failed
+        ? const Color(0xFFB83A59)
+        : active
+            ? _violet
+            : _cyan;
+    final label = active
+        ? 'Working'
+        : failed
+            ? 'Needs attention'
+            : 'Captured';
     return Padding(
       padding: const EdgeInsets.all(14),
       child: Row(
@@ -971,9 +1025,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
-                        color: _ink, fontSize: 12, fontWeight: FontWeight.w700)),
+                        color: _ink,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700)),
                 const SizedBox(height: 4),
-                Text('$label · ${item.sourceApp.isEmpty ? 'web source' : item.sourceApp}',
+                Text(
+                    '$label · ${item.sourceApp.isEmpty ? 'web source' : item.sourceApp}',
                     style: TextStyle(
                         color: color,
                         fontSize: 10,
@@ -1004,7 +1061,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       child: Ink(
         padding: const EdgeInsets.all(17),
         decoration: BoxDecoration(
-            color: const Color(0xFFECE9FF), borderRadius: BorderRadius.circular(22)),
+            color: const Color(0xFFECE9FF),
+            borderRadius: BorderRadius.circular(22)),
         child: Row(
           children: [
             Container(
@@ -1020,17 +1078,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text('Cloud Vault',
-                          style: TextStyle(
-                              color: _ink,
-                              fontWeight: FontWeight.w800,
-                              fontSize: 14)),
-                      SizedBox(height: 4),
-                      Text(
-                          'Back up your creative memory and keep it in sync.',
-                          style:
-                              TextStyle(color: _muted, fontSize: 11)),
-                    ])),
+                  Text('Cloud Vault',
+                      style: TextStyle(
+                          color: _ink,
+                          fontWeight: FontWeight.w800,
+                          fontSize: 14)),
+                  SizedBox(height: 4),
+                  Text('Back up your creative memory and keep it in sync.',
+                      style: TextStyle(color: _muted, fontSize: 11)),
+                ])),
             const Icon(Icons.arrow_forward_rounded, color: _violet, size: 19),
           ],
         ),
@@ -1050,8 +1106,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _buildSectionHeading('Capture from everywhere',
-            'One library for every source'),
+        _buildSectionHeading(
+            'Capture from everywhere', 'One library for every source'),
         const SizedBox(height: 12),
         SizedBox(
           height: 48,

@@ -21,14 +21,45 @@ const PRICE_PER_1M_INPUT_TOKENS_USD = 0.15;
 const PRICE_PER_1M_OUTPUT_TOKENS_USD = 0.60;
 
 // What fraction of the subscription price is allowed to go toward AI costs,
-// per billing period. 0.30 = 30%, matching Play 15% + this 30% + your 55%.
+// per billing period. This is 30%, not 40% — see below for why.
+//
+// Google Play takes 15%. That leaves 40% of the subscription price as the
+// total variable-cost ceiling if 45% margin is guaranteed. AI usage isn't
+// the only real cost though — Cloud Vault Pro's 3GB storage has a real
+// Firebase bill too, and until now nothing capped or even tracked it.
+//
+// Real Firebase Storage rates (2026): $0.026/GB stored/month, $0.12/GB
+// downloaded. Worst case for one heavy Cloud Vault user — full 3GB stored,
+// and generously assuming they re-sync/re-view their whole 3GB twice in a
+// month (6GB downloaded): 3 * 0.026 + 6 * 0.12 = $0.80/month. Against the
+// $3.99 monthly plan that's ~20%; against the $35.99 annual plan's
+// $3.00/month-equivalent, it's worse — ~27%. Realistic average usage will
+// be far below this (most users don't fill 3GB or redownload it
+// repeatedly), but the WORST case matters for a guarantee, not the average.
+//
+// So: 30% for AI + ~10% reserved headroom for storage = 40% total,
+// matching the 40% ceiling the 45% margin actually requires. If real
+// billing data (Firebase Console → Usage & billing) later shows storage
+// costs are consistently much lower than this worst case, this can go back
+// up — but move it with real numbers in hand, not another guess.
 const AI_BUDGET_FRACTION = 0.30;
 
-// Same 30% rule applies to one-off credit top-ups — see redeemCreditPurchase
-// in index.js. A top-up grants (price paid * this fraction) worth of budget,
-// exactly like a subscription period does, so buying credits can't be a
-// worse deal for your margin than the subscription itself.
-const TOPUP_BUDGET_FRACTION = 0.30;
+// Credit packs get a LOWER fraction than subscriptions — not the same 30%.
+// Google Play changed its fee structure on June 30, 2026 (US/UK/EEA
+// first; other regions follow through 2027): subscriptions still pay a
+// combined ~15% (10% service + 5% billing), but ONE-TIME/consumable
+// purchases — which is what a credit pack is — now pay 20-25% service fee
+// (new vs. existing installs) + 5% billing = 20-30% total, depending on
+// region and install cohort. Nigeria/rest-of-world stays on the old flat
+// 15% until Sept 30, 2027, but any US/UK/EEA buyer is already on the new,
+// higher rate as of today.
+//
+// To guarantee 45% margin even in the WORST case (30% Play cut on a
+// one-time purchase): 100 - 30 (Play) - 25 (this) = 45. That's why this is
+// 25%, not 30% — using the subscription number here would have let a
+// credit-pack sale from a US/UK/EEA buyer quietly fall below the 45%
+// guarantee once Play started taking more than 15% on that transaction.
+const TOPUP_BUDGET_FRACTION = 0.25;
 
 // User-facing display unit. Showing "$0.014 remaining" looks cheap and
 // exposes your margin math; showing "14 credits remaining" doesn't. Purely

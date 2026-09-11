@@ -5,6 +5,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:all_social_downloader/ui/screens/premium_screen.dart';
+import 'package:all_social_downloader/ui/screens/buy_credits_screen.dart';
 import 'package:all_social_downloader/ui/themes/app_theme.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -55,7 +56,6 @@ class _RepurposeStudioState extends State<RepurposeStudio> {
       label: 'Quick Pack',
       description: 'Free: Caption + Checklist',
       color: Color(0xFF6C63FF),
-      credits: 0,
     ),
     const RepurposeActionItem(
       id: 'caption',
@@ -63,7 +63,6 @@ class _RepurposeStudioState extends State<RepurposeStudio> {
       label: 'Smart Caption',
       description: 'AI writes engaging captions',
       color: Color(0xFF6C63FF),
-      credits: 2,
     ),
     const RepurposeActionItem(
       id: 'hashtags',
@@ -71,7 +70,6 @@ class _RepurposeStudioState extends State<RepurposeStudio> {
       label: 'Smart Hashtags',
       description: 'Trending & niche hashtags',
       color: Color(0xFF00C2FF),
-      credits: 2,
     ),
     const RepurposeActionItem(
       id: 'subtitle',
@@ -79,8 +77,6 @@ class _RepurposeStudioState extends State<RepurposeStudio> {
       label: 'Subtitles',
       description: 'Auto-generate SRT file',
       color: Color(0xFF22C55E),
-      credits: 5,
-      isPremium: true,
     ),
     const RepurposeActionItem(
       id: 'translate',
@@ -88,8 +84,6 @@ class _RepurposeStudioState extends State<RepurposeStudio> {
       label: 'Translate',
       description: 'Translate captions/speech',
       color: Color(0xFFF59E0B),
-      credits: 5,
-      isPremium: true,
     ),
     const RepurposeActionItem(
       id: 'summarize',
@@ -97,8 +91,6 @@ class _RepurposeStudioState extends State<RepurposeStudio> {
       label: 'Summarize',
       description: 'Key points and takeaways',
       color: Color(0xFFEC4899),
-      credits: 5,
-      isPremium: true,
     ),
     const RepurposeActionItem(
       id: 'script',
@@ -106,8 +98,6 @@ class _RepurposeStudioState extends State<RepurposeStudio> {
       label: 'Script',
       description: 'Full video script',
       color: Color(0xFF8B5CF6),
-      credits: 5,
-      isPremium: true,
     ),
     const RepurposeActionItem(
       id: 'tweet_thread',
@@ -115,8 +105,6 @@ class _RepurposeStudioState extends State<RepurposeStudio> {
       label: 'Tweet Thread',
       description: 'Twitter/X thread',
       color: Color(0xFF1DA1F2),
-      credits: 3,
-      isPremium: true,
     ),
   ];
 
@@ -134,12 +122,24 @@ class _RepurposeStudioState extends State<RepurposeStudio> {
       await prefs.setString('repurpose_free_day', today);
       await prefs.setInt('repurpose_free_remaining', 2);
     }
-    final credits = await _ai.getAICredits();
     final premium = await _ai.verifyPremium();
+    final isPremium = premium['isPremium'] ?? false;
+
+    // The real /getAICredits shape has no field called "credits" — that
+    // never existed server-side, so this used to silently read 0 for
+    // everyone. Premium users get a real remainingCredits number; free
+    // users don't need one here since every AI action except Quick Pack
+    // is fully premium-gated regardless of credits.
+    int remaining = 0;
+    if (isPremium) {
+      final credits = await _ai.getAICredits();
+      remaining = credits['remainingCredits'] as int? ?? 0;
+    }
+
     if (mounted) {
       setState(() {
-        _remainingCredits = credits['credits'] ?? 0;
-        _isPremium = premium['isPremium'] ?? false;
+        _remainingCredits = remaining;
+        _isPremium = isPremium;
         _freePacksRemaining = prefs.getInt('repurpose_free_remaining') ?? 2;
       });
     }
@@ -284,15 +284,12 @@ class _RepurposeStudioState extends State<RepurposeStudio> {
       itemCount: _actions.length,
       itemBuilder: (context, index) {
         final action = _actions[index];
-        final isLocked = action.isPremium && !_isPremium;
-        final canAfford = _remainingCredits >= action.credits;
+        final isLocked = action.id != 'quick_pack' && !_isPremium;
 
         return GestureDetector(
           onTap: () {
             if (isLocked) {
               _showPremiumDialog();
-            } else if (!canAfford && action.credits > 0) {
-              _showInsufficientCreditsDialog();
             } else {
               _handleAction(action.id);
             }
@@ -343,13 +340,10 @@ class _RepurposeStudioState extends State<RepurposeStudio> {
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      action.id == 'quick_pack'
-                          ? 'FREE'
-                          : '${action.credits} credits',
+                      action.id == 'quick_pack' ? 'FREE' : 'PRO',
                       style: AppTypography.caption.copyWith(
-                        color: canAfford && !isLocked
-                            ? AppColors.success
-                            : AppColors.textMuted,
+                        color:
+                            !isLocked ? AppColors.success : AppColors.textMuted,
                         fontSize: 8,
                       ),
                     ),
@@ -602,7 +596,14 @@ class _RepurposeStudioState extends State<RepurposeStudio> {
       _processingMessage = 'Finalizing...';
       await Future.delayed(const Duration(milliseconds: 200));
 
-      if (mounted) {
+      if (!mounted) return;
+
+      // The server always says success:true/false — this used to default
+      // straight to a hardcoded "Generated successfully!" without ever
+      // checking that flag, so a 402 (not premium) or 429 (budget used up)
+      // response looked identical to a real result. Checking it is what
+      // actually makes the premium gate mean anything.
+      if (result['success'] == true) {
         setState(() {
           _isGenerating = false;
           _processingProgress = 1.0;
@@ -612,20 +613,36 @@ class _RepurposeStudioState extends State<RepurposeStudio> {
         });
         _showSuccessSnackbar('${_getActionLabel(actionId)} generated!');
         widget.onComplete?.call();
+        return;
+      }
+
+      // Real failure — show the server's actual reason, not a fabricated
+      // result that looks like it worked.
+      final serverError =
+          (result['error'] as String?) ?? 'Something went wrong';
+      setState(() {
+        _isGenerating = false;
+        _processingProgress = 0;
+      });
+      if (serverError.toLowerCase().contains('upgrade') ||
+          serverError.toLowerCase().contains('premium')) {
+        _showPremiumDialog();
+      } else if (serverError.toLowerCase().contains('budget')) {
+        _showBudgetExhaustedDialog(serverError);
+      } else {
+        setState(() => _error = serverError);
       }
     } catch (e) {
-      // Provide fallback results for each action type
-      final fallback = _getFallbackResult(actionId);
+      // A genuine network/parsing failure — say so plainly. No fabricated
+      // "offline mode" result; that's exactly what let free users get a
+      // real-looking output for free with zero indication anything failed.
       if (mounted) {
         setState(() {
           _isGenerating = false;
           _processingProgress = 0;
-          if (_results == null) _results = {};
-          _results![actionId] = fallback;
+          _error =
+              'Could not reach the server. Check your connection and try again.';
         });
-        _showSuccessSnackbar(
-            '${_getActionLabel(actionId)} generated (offline mode)');
-        widget.onComplete?.call();
       }
     }
   }
@@ -658,50 +675,6 @@ Ask viewers to like, comment, or share.
 
 📝 TIP: Keep it authentic and engaging!
 ''';
-  }
-
-  Map<String, dynamic> _getFallbackResult(String actionId) {
-    switch (actionId) {
-      case 'caption':
-        return {
-          'caption':
-              '🔥 Watch this amazing content! Save it for later inspiration. 💡 #ContentCreator #Viral #MustWatch',
-          'variations': [
-            '🎯 This is pure gold! Tag a friend who needs to see this.',
-            '✨ When creativity meets perfection. More content like this coming soon!',
-          ],
-        };
-      case 'hashtags':
-        return {
-          'trending': ['#viral', '#fyp', '#trending', '#explore'],
-          'niche': ['#contentcreator', '#creatorcommunity', '#digitalcreator'],
-          'recommended': ['#saveit', '#clipvault', '#contentlibrary'],
-        };
-      case 'subtitle':
-        return {
-          'subtitle':
-              'SRT file generated successfully. Check your downloads folder.'
-        };
-      case 'translate':
-        return {
-          'result':
-              'Translation complete. Content is now available in multiple languages.'
-        };
-      case 'summarize':
-        return {
-          'summary':
-              '📝 Summary: This content is engaging and valuable. Key takeaway: Save and repurpose for maximum reach!'
-        };
-      case 'script':
-        return {'script': _generateQuickScript()};
-      case 'tweet_thread':
-        return {
-          'thread':
-              '🧵 Thread: 1/5 This is amazing! 2/5 Here\'s why... 3/5 The key insight... 4/5 How to use it... 5/5 Save and share!'
-        };
-      default:
-        return {'result': 'Action completed successfully!'};
-    }
   }
 
   void _showSuccessSnackbar(String message) {
@@ -774,7 +747,7 @@ Ask viewers to like, comment, or share.
     );
   }
 
-  void _showInsufficientCreditsDialog() {
+  void _showBudgetExhaustedDialog(String serverMessage) {
     showModalBottomSheet(
       context: context,
       backgroundColor: AppColors.surface,
@@ -799,11 +772,14 @@ Ask viewers to like, comment, or share.
               const Icon(Icons.bolt_rounded,
                   color: AppColors.warning, size: 48),
               const SizedBox(height: AppSpacing.md),
-              const Text('Insufficient AI Credits',
+              const Text('AI allowance used up',
                   style: AppTypography.headlineMedium),
               const SizedBox(height: AppSpacing.sm),
+              // The server's own message — it already says exactly what
+              // happened and what to do (buy credits or wait for renewal),
+              // no need to guess at different copy here.
               Text(
-                'You need more AI credits to use this feature. Upgrade to Pro for 2,000 monthly credits.',
+                serverMessage,
                 style: AppTypography.bodyMedium,
                 textAlign: TextAlign.center,
               ),
@@ -814,15 +790,15 @@ Ask viewers to like, comment, or share.
                   onPressed: () {
                     Navigator.pop(context);
                     Navigator.of(context).push(MaterialPageRoute(
-                      builder: (_) => const PremiumScreen(),
+                      builder: (_) => const BuyCreditsScreen(),
                     ));
                   },
-                  child: const Text('Upgrade to Pro'),
+                  child: const Text('Buy Credits'),
                 ),
               ),
               TextButton(
                 onPressed: () => Navigator.pop(context),
-                child: const Text('Maybe Later'),
+                child: const Text('Got it'),
               ),
             ],
           ),
@@ -844,8 +820,6 @@ class RepurposeActionItem {
   final String label;
   final String description;
   final Color color;
-  final int credits;
-  final bool isPremium;
 
   const RepurposeActionItem({
     required this.id,
@@ -853,8 +827,6 @@ class RepurposeActionItem {
     required this.label,
     required this.description,
     required this.color,
-    this.credits = 1,
-    this.isPremium = false,
   });
 }
 

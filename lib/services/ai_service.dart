@@ -1,5 +1,5 @@
 // services/ai_service.dart
-// COMPLETE - All AI features for ClipVault
+// COMPLETE - All AI features for MediaNest
 // Handles: AI Tagging, Captions, Hashtags, Subtitles, Translation, Summarization
 
 import 'dart:convert';
@@ -352,7 +352,16 @@ class AIService {
       );
 
       if (response.statusCode != 200) {
-        throw Exception('Translation failed: ${response.body}');
+        String message = 'Translation failed';
+        try {
+          final errBody = jsonDecode(response.body);
+          if (errBody is Map && errBody['error'] is String) {
+            message = errBody['error'] as String;
+          }
+        } catch (_) {
+          // Body wasn't JSON — fall back to the generic message above.
+        }
+        throw Exception(message);
       }
 
       final decoded = jsonDecode(response.body);

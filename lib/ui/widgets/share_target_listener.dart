@@ -54,8 +54,8 @@ class _ShareTargetListenerState extends State<ShareTargetListener> {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(imported
-            ? 'Shared media added to your ClipVault library.'
-            : 'ClipVault could not import that shared media.'),
+            ? 'Shared media added to your MediaNest library.'
+            : 'MediaNest could not import that shared media.'),
         backgroundColor: imported ? AppColors.primary : AppColors.error,
         behavior: SnackBarBehavior.floating,
       ),

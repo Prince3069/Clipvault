@@ -84,4 +84,39 @@ async function checkAndConsumeCredit(uid, feature, dailyLimit) {
   });
 }
 
-module.exports = {requireAuth, attachPremiumStatus, requirePremium, checkAndConsumeCredit};
+/**
+ * Same idea as checkAndConsumeCredit, but the period key is {yyyy-mm}
+ * instead of {yyyy-mm-dd} — for limits like "1 free translation, then
+ * wait until next month," where a daily reset would give far more free
+ * usage than intended.
+ */
+async function checkAndConsumeMonthlyCredit(uid, feature, monthlyLimit) {
+  const db = admin.firestore();
+  const month = new Date().toISOString().slice(0, 7); // "2026-09"
+  const ref = db.collection("users").doc(uid).collection("aiCredits").doc(`${feature}_${month}`);
+
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    const used = snap.exists ? snap.data().count || 0 : 0;
+    if (used >= monthlyLimit) return false;
+    tx.set(
+        ref,
+        {
+          count: used + 1,
+          feature,
+          month,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        {merge: true},
+    );
+    return true;
+  });
+}
+
+module.exports = {
+  requireAuth,
+  attachPremiumStatus,
+  requirePremium,
+  checkAndConsumeCredit,
+  checkAndConsumeMonthlyCredit,
+};

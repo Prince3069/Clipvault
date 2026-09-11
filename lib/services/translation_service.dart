@@ -1,77 +1,77 @@
 // services/translation_service.dart
 // COMPLETE - Translation with Free Trial
+//
+// This used to track "1 free translation" in a local SharedPreferences
+// counter that NEVER reset on its own — resetFreeTranslations() existed but
+// nothing ever called it. So after a free user's first-ever translation,
+// they'd be locked out forever, even though the server (index.js) resets
+// its own free-tier counter every calendar month. The two disagreed, and
+// the client's stricter, stale answer always won.
+//
+// It also checked `credits['credits']`, a field that never existed in the
+// server's real /getAICredits response shape (which returns
+// `remainingCredits` for premium users, or `used`/`limits` for free users)
+// — so that check silently always evaluated to 0 and never actually did
+// anything, including never recognizing purchased top-up credits.
+//
+// Fixed by removing the local gate entirely. The server is the only source
+// of truth for whether a translation is allowed — this just calls it and
+// reports back what it says, including its real error message when it says no.
 
-import 'package:shared_preferences/shared_preferences.dart';
 import 'ai_service.dart';
 
 class TranslationService {
-  static const String _kFreeTranslationsUsed = 'free_translations_used';
-  static const int _kMaxFreeTranslations = 1;
-
   final AIService _ai = AIService();
 
-  Future<int> getRemainingFreeTranslations() async {
-    final prefs = await SharedPreferences.getInstance();
-    final used = prefs.getInt(_kFreeTranslationsUsed) ?? 0;
-    return _kMaxFreeTranslations - used;
-  }
-
-  Future<bool> hasFreeTranslation() async {
-    return (await getRemainingFreeTranslations()) > 0;
-  }
-
-  Future<void> useFreeTranslation() async {
-    final prefs = await SharedPreferences.getInstance();
-    final used = prefs.getInt(_kFreeTranslationsUsed) ?? 0;
-    await prefs.setInt(_kFreeTranslationsUsed, used + 1);
-  }
-
-  Future<bool> canTranslate() async {
-    final premium = await _ai.verifyPremium();
-    if (premium['isPremium'] == true) return true;
-
-    final credits = await _ai.getAICredits();
-    if ((credits['credits'] ?? 0) >= 2) return true;
-
-    return await hasFreeTranslation();
-  }
-
+  /// Pulls the real, current state from the server. Shape depends on
+  /// whether the user is premium — see index.js's /getAICredits:
+  /// premium:  {isPremium: true, planId, remainingCredits, ...}
+  /// free:     {isPremium: false, used: {translateText: n}, limits: {...}}
   Future<Map<String, dynamic>> getRemainingTranslations() async {
-    final premium = await _ai.verifyPremium();
     final credits = await _ai.getAICredits();
-    final freeRemaining = await getRemainingFreeTranslations();
+    final isPremium = credits['isPremium'] == true;
+
+    if (isPremium) {
+      final remainingCredits = credits['remainingCredits'] as int? ?? 0;
+      return {
+        'isPremium': true,
+        'remainingCredits': remainingCredits,
+        'canTranslate': remainingCredits > 0,
+      };
+    }
+
+    final used = credits['used'] as Map<String, dynamic>? ?? {};
+    final limits = credits['limits'] as Map<String, dynamic>? ?? {};
+    final usedThisMonth = used['translateText'] as int? ?? 0;
+    final monthlyLimit = limits['translateText'] as int? ?? 1;
+    final freeRemaining = (monthlyLimit - usedThisMonth).clamp(0, monthlyLimit);
 
     return {
-      'isPremium': premium['isPremium'] ?? false,
-      'aiCredits': credits['credits'] ?? 0,
+      'isPremium': false,
       'freeTranslationsRemaining': freeRemaining,
-      'canTranslate': await canTranslate(),
+      'canTranslate': freeRemaining > 0,
     };
   }
 
+  Future<bool> canTranslate() async {
+    final state = await getRemainingTranslations();
+    return state['canTranslate'] == true;
+  }
+
+  Future<bool> isOutOfTranslations() async {
+    return !(await canTranslate());
+  }
+
+  /// Attempts the translation. The server is the only place that actually
+  /// decides yes/no and consumes the allowance — this doesn't pre-check or
+  /// track anything locally, so there's nothing here that can drift out of
+  /// sync with what the server enforces.
   Future<Map<String, dynamic>> translate({
     required String text,
     required String targetLanguage,
     String? sourceLanguage,
   }) async {
-    final canTranslate = await this.canTranslate();
-    if (!canTranslate) {
-      return {
-        'success': false,
-        'error': 'No translations remaining. Please upgrade to Pro.',
-        'needsUpgrade': true,
-      };
-    }
-
     try {
-      bool usedFree = false;
-      final hasFree = await hasFreeTranslation();
-
-      if (hasFree) {
-        await useFreeTranslation();
-        usedFree = true;
-      }
-
       final result = await _ai.translateText(
         text: text,
         targetLanguage: targetLanguage,
@@ -81,33 +81,22 @@ class TranslationService {
       return {
         'success': true,
         'translation': result,
-        'usedFree': usedFree,
-        'remainingFree': await getRemainingFreeTranslations(),
-        'message': usedFree
-            ? '✅ Free translation used! ${await getRemainingFreeTranslations()} left'
-            : '✅ Translation complete!',
+        'message': '✅ Translation complete!',
       };
     } catch (e) {
-      final prefs = await SharedPreferences.getInstance();
-      final used = prefs.getInt(_kFreeTranslationsUsed) ?? 0;
-      if (used > 0) {
-        await prefs.setInt(_kFreeTranslationsUsed, used - 1);
-      }
-
+      // ai_service.dart already extracts the server's real error message
+      // (e.g. "Your free translation for this month is used — upgrade to
+      // Pro for unlimited, or wait until next month for another free
+      // one.") — strip Dart's "Exception: " wrapper so the UI shows that
+      // message cleanly instead of as a stack-trace-looking string.
+      final message = e.toString().replaceFirst('Exception: ', '');
+      final needsUpgrade = message.toLowerCase().contains('upgrade') ||
+          message.toLowerCase().contains('budget');
       return {
         'success': false,
-        'error': e.toString(),
+        'error': message,
+        'needsUpgrade': needsUpgrade,
       };
     }
-  }
-
-  Future<void> resetFreeTranslations() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove(_kFreeTranslationsUsed);
-  }
-
-  Future<bool> isOutOfTranslations() async {
-    final canTranslate = await this.canTranslate();
-    return !canTranslate;
   }
 }

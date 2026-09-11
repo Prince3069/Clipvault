@@ -7,6 +7,7 @@ import 'package:provider/provider.dart';
 import '../../providers/premium_provider.dart';
 import '../../services/purchase_service.dart';
 import '../themes/app_theme.dart';
+import 'buy_credits_screen.dart';
 
 class PremiumScreen extends StatefulWidget {
   const PremiumScreen({Key? key}) : super(key: key);
@@ -45,14 +46,16 @@ class _PremiumScreenState extends State<PremiumScreen> {
   };
 
   ProductDetails? _productFor(String planKey) {
-    final premiumProvider = Provider.of<PremiumProvider>(context, listen: false);
+    final premiumProvider =
+        Provider.of<PremiumProvider>(context, listen: false);
     return planKey == 'monthly'
         ? premiumProvider.purchaseService.monthly
         : premiumProvider.purchaseService.annual;
   }
 
   Future<void> _handlePurchase(PurchasePlan plan) async {
-    final premiumProvider = Provider.of<PremiumProvider>(context, listen: false);
+    final premiumProvider =
+        Provider.of<PremiumProvider>(context, listen: false);
     await premiumProvider.buyPlan(plan);
     if (!mounted) return;
     final error = premiumProvider.errorMessage;
@@ -68,7 +71,8 @@ class _PremiumScreenState extends State<PremiumScreen> {
   }
 
   Future<void> _handleRestore() async {
-    final premiumProvider = Provider.of<PremiumProvider>(context, listen: false);
+    final premiumProvider =
+        Provider.of<PremiumProvider>(context, listen: false);
     await premiumProvider.restorePurchases();
     if (!mounted) return;
     final error = premiumProvider.errorMessage;
@@ -99,7 +103,7 @@ class _PremiumScreenState extends State<PremiumScreen> {
     return Scaffold(
       backgroundColor: AppColors.bg,
       appBar: AppBar(
-        title: const Text('ClipVault Pro'),
+        title: const Text('MediaNest Pro'),
         backgroundColor: AppColors.bg,
         foregroundColor: AppColors.textPrimary,
         elevation: 0,
@@ -124,7 +128,8 @@ class _PremiumScreenState extends State<PremiumScreen> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const Icon(Icons.error_outline_rounded, color: AppColors.error, size: 64),
+            const Icon(Icons.error_outline_rounded,
+                color: AppColors.error, size: 64),
             const SizedBox(height: 16),
             Text(
               premiumProvider.errorMessage ??
@@ -177,7 +182,8 @@ class _PremiumScreenState extends State<PremiumScreen> {
                 ),
                 const SizedBox(height: 8),
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                   decoration: BoxDecoration(
                     color: Colors.white.withValues(alpha: 0.15),
                     borderRadius: BorderRadius.circular(8),
@@ -214,12 +220,18 @@ class _PremiumScreenState extends State<PremiumScreen> {
             style: AppTypography.titleMedium.copyWith(color: AppColors.success),
           ),
           const SizedBox(height: 8),
-          _buildFeatureItem('Downloads', '10 per day, from Instagram, TikTok, Facebook, Vimeo, LinkedIn & more'),
-          _buildFeatureItem('WhatsApp Status saver', 'Save and share statuses — photos and videos'),
-          _buildFeatureItem('Private Vault', 'PIN protected, with a decoy PIN option'),
-          _buildFeatureItem('Quick Clip Editor basics', 'Trim, rotate, change speed, extract a frame, extract audio, split'),
-          _buildFeatureItem('Translation', '1 free translation a day — text, speech & video'),
-          _buildFeatureItem('No ads. Ever.', 'Not now, not later — that never changes on any plan'),
+          _buildFeatureItem('Downloads',
+              '10 per day, from Instagram, TikTok, Facebook, Vimeo, LinkedIn & more'),
+          _buildFeatureItem('WhatsApp Status saver',
+              'Save and share statuses — photos and videos'),
+          _buildFeatureItem(
+              'Private Vault', 'PIN protected, with a decoy PIN option'),
+          _buildFeatureItem('Quick Clip Editor basics',
+              'Trim, rotate, change speed, extract a frame, extract audio, split'),
+          _buildFeatureItem(
+              'Translation', '1 free translation a day — text, speech & video'),
+          _buildFeatureItem('No ads. Ever.',
+              'Not now, not later — that never changes on any plan'),
 
           const SizedBox(height: 24),
 
@@ -230,12 +242,18 @@ class _PremiumScreenState extends State<PremiumScreen> {
           const SizedBox(height: 8),
           _buildFeatureItem('Unlimited downloads', 'No daily cap'),
           _buildFeatureItem('HD & 4K quality', 'Highest available resolution'),
-          _buildFeatureItem('Batch download', 'Download multiple videos at once'),
-          _buildFeatureItem('Cloud Vault Pro', '3GB synced storage across your devices'),
-          _buildFeatureItem('Auto-backup statuses', 'WhatsApp statuses saved automatically'),
-          _buildFeatureItem('Repurpose Studio', 'AI captions, hashtags, subtitles, scripts & more per clip'),
-          _buildFeatureItem('Creator Coach', 'Personalized coaching, daily challenges & content ideas'),
-          _buildFeatureItem('Unlimited translation', 'Text, speech & video — to and from any language'),
+          _buildFeatureItem(
+              'Batch download', 'Download multiple videos at once'),
+          _buildFeatureItem(
+              'Cloud Vault Pro', '3GB synced storage across your devices'),
+          _buildFeatureItem(
+              'Auto-backup statuses', 'WhatsApp statuses saved automatically'),
+          _buildFeatureItem('Repurpose Studio',
+              'AI captions, hashtags, subtitles, scripts & more per clip'),
+          _buildFeatureItem('Creator Coach',
+              'Personalized coaching, daily challenges & content ideas'),
+          _buildFeatureItem('Unlimited translation',
+              'Text, speech & video — to and from any language'),
 
           const SizedBox(height: 32),
 
@@ -297,6 +315,22 @@ class _PremiumScreenState extends State<PremiumScreen> {
                           : const Text('Start 4-Day Free Trial'),
                     ),
                   ),
+                if (isPremium)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        onPressed: () {
+                          Navigator.of(context).push(MaterialPageRoute(
+                            builder: (_) => const BuyCreditsScreen(),
+                          ));
+                        },
+                        icon: const Icon(Icons.bolt_rounded, size: 18),
+                        label: const Text('Buy more AI credits'),
+                      ),
+                    ),
+                  ),
                 TextButton(
                   onPressed: premiumProvider.isLoading ? null : _handleRestore,
                   child: const Text('Restore purchases'),
@@ -330,7 +364,8 @@ class _PremiumScreenState extends State<PremiumScreen> {
                         ),
                       ),
                     ),
-                    const Text(' · ', style: TextStyle(color: AppColors.textMuted)),
+                    const Text(' · ',
+                        style: TextStyle(color: AppColors.textMuted)),
                     GestureDetector(
                       onTap: () {
                         // Open terms of service
@@ -407,7 +442,8 @@ class _PremiumScreenState extends State<PremiumScreen> {
   }) {
     final isSelected = plan['id'] == PurchaseService.kMonthlyId;
     final color = plan['color'] as Color;
-    final planKey = plan['id'] == PurchaseService.kMonthlyId ? 'monthly' : 'annual';
+    final planKey =
+        plan['id'] == PurchaseService.kMonthlyId ? 'monthly' : 'annual';
     final product = _productFor(planKey);
 
     // Prefer the real, localized price from Google Play. It's already
@@ -448,7 +484,8 @@ class _PremiumScreenState extends State<PremiumScreen> {
                         ),
                         const SizedBox(width: 8),
                         Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 2),
                           decoration: BoxDecoration(
                             color: color.withValues(alpha: 0.15),
                             borderRadius: BorderRadius.circular(4),

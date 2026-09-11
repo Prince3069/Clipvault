@@ -2691,7 +2691,7 @@ class _QuickClipEditorState extends State<QuickClipEditor>
                   const SizedBox(width: AppSpacing.sm),
                   Expanded(
                     child: Text(
-                      'Saved in: Download/ClipVaults/Edits/',
+                      'Saved in: Download/MediaNest/Edits/',
                       style: AppTypography.caption.copyWith(
                         color: AppColors.success,
                       ),

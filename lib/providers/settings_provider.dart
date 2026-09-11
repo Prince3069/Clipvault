@@ -10,7 +10,7 @@ class SettingsProvider extends ChangeNotifier {
   bool _showFloatingButton = true;
   bool _isDarkMode = true;
   bool _autoSyncToCloud = false; // NEW
-  String _downloadPath = '/storage/emulated/0/Download/ClipVaults';
+  String _downloadPath = '/storage/emulated/0/Download/MediaNest';
 
   bool get showNotifications => _showNotifications;
   bool get autoDetectLinks => _autoDetectLinks;
@@ -31,7 +31,7 @@ class SettingsProvider extends ChangeNotifier {
     _isDarkMode = prefs.getBool('isDarkMode') ?? true;
     _autoSyncToCloud = prefs.getBool('autoSyncToCloud') ?? false; // NEW
     _downloadPath = prefs.getString('downloadPath') ??
-        '/storage/emulated/0/Download/ClipVaults';
+        '/storage/emulated/0/Download/MediaNest';
     notifyListeners();
   }
 

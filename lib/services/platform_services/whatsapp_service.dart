@@ -247,7 +247,7 @@ class WhatsAppService {
       }
 
       final destination =
-          Directory('/storage/emulated/0/Download/ClipVaults/WhatsApp');
+          Directory('/storage/emulated/0/Download/MediaNest/WhatsApp');
       await destination.create(recursive: true);
       final savedPath = '${destination.path}/$fileName';
       await sourceFile.copy(savedPath);

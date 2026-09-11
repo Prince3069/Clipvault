@@ -14,10 +14,10 @@ class PurchaseService {
   // Consumable credit packs — IDs must match functions/lib/budget.js's
   // CREDIT_PACKS exactly, and must be created in Play Console as
   // "In-app products" (consumable), NOT subscriptions.
-  static const String kCredits099Id = 'clipvault_credits_099';
-  static const String kCredits299Id = 'clipvault_credits_299';
-  static const String kCredits699Id = 'clipvault_credits_699';
-  static const String kCredits1499Id = 'clipvault_credits_1499';
+  static const String kCredits099Id = 'MediaNest_credits_099';
+  static const String kCredits299Id = 'MediaNest_credits_299';
+  static const String kCredits699Id = 'MediaNest_credits_699';
+  static const String kCredits1499Id = 'MediaNest_credits_1499';
   static const Set<String> creditPackIds = {
     kCredits099Id,
     kCredits299Id,

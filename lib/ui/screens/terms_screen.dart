@@ -26,28 +26,28 @@ class TermsScreen extends StatelessWidget {
             _paragraph('Last updated: January 2025'),
             const SizedBox(height: 20),
             _paragraph(
-              'Welcome to ClipVaults. By downloading and using this application, you agree to these Terms of Service. Please read them carefully.',
+              'Welcome to MediaNest. By downloading and using this application, you agree to these Terms of Service. Please read them carefully.',
             ),
 
             _heading('1. Acceptance of Terms'),
             _paragraph(
-              'By using ClipVaults, you agree to be bound by these terms. If you do not agree, please do not use the application.',
+              'By using MediaNest, you agree to be bound by these terms. If you do not agree, please do not use the application.',
             ),
 
             _heading('2. Description of Service'),
             _paragraph(
-              'ClipVaults is a free media downloading application that allows users to save media from supported social media platforms for personal, offline use. The app uses Cobalt (cobalt.tools), an open-source service, to process media extraction.',
+              'MediaNest is a free media downloading application that allows users to save media from supported social media platforms for personal, offline use. The app uses Cobalt (cobalt.tools), an open-source service, to process media extraction.',
             ),
 
             _heading('3. Permitted Uses'),
-            _paragraph('You may use ClipVaults to:'),
+            _paragraph('You may use MediaNest to:'),
             _bullet('Download publicly available media for personal, offline viewing'),
             _bullet('Save WhatsApp status updates shared with you'),
             _bullet('Archive media you have created or own the rights to'),
             _bullet('Download content you have explicit permission to download'),
 
             _heading('4. Prohibited Uses'),
-            _paragraph('You must NOT use ClipVaults to:'),
+            _paragraph('You must NOT use MediaNest to:'),
             _bullet('Download copyrighted content without permission from the rights holder'),
             _bullet('Redistribute, sell, or commercially exploit downloaded content'),
             _bullet('Download private content without the owner\'s consent'),
@@ -57,17 +57,17 @@ class TermsScreen extends StatelessWidget {
 
             _heading('5. Intellectual Property'),
             _paragraph(
-              'You acknowledge that all content on social media platforms belongs to their respective creators and owners. ClipVaults does not claim ownership of any downloaded content. You are solely responsible for ensuring you have the legal right to download any content.',
+              'You acknowledge that all content on social media platforms belongs to their respective creators and owners. MediaNest does not claim ownership of any downloaded content. You are solely responsible for ensuring you have the legal right to download any content.',
             ),
 
             _heading('6. Platform Terms of Service'),
             _paragraph(
-              'Using ClipVaults to download content may violate the terms of service of the social media platforms whose content you download. You are responsible for understanding and complying with the terms of those platforms.',
+              'Using MediaNest to download content may violate the terms of service of the social media platforms whose content you download. You are responsible for understanding and complying with the terms of those platforms.',
             ),
 
             _heading('7. Disclaimer of Warranties'),
             _paragraph(
-              'ClipVaults is provided "as is" without warranty of any kind. We do not guarantee that:',
+              'MediaNest is provided "as is" without warranty of any kind. We do not guarantee that:',
             ),
             _bullet('The app will work with all URLs or platforms at all times'),
             _bullet('Downloads will always be successful'),
@@ -76,7 +76,7 @@ class TermsScreen extends StatelessWidget {
 
             _heading('8. Limitation of Liability'),
             _paragraph(
-              'ClipVaults and its developers are not liable for any damages arising from your use of the application, including but not limited to: loss of data, infringement claims from third parties, violations of platform terms, or any indirect, incidental, or consequential damages.',
+              'MediaNest and its developers are not liable for any damages arising from your use of the application, including but not limited to: loss of data, infringement claims from third parties, violations of platform terms, or any indirect, incidental, or consequential damages.',
             ),
 
             _heading('9. Fair Use'),

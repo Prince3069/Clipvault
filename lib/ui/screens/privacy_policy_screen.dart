@@ -26,11 +26,11 @@ class PrivacyPolicyScreen extends StatelessWidget {
             _paragraph('Last updated: August 2026'),
             const SizedBox(height: 20),
             _paragraph(
-              'ClipVaults ("the App") is committed to protecting your privacy. This Privacy Policy explains how we handle information when you use our application.',
+              'MediaNest ("the App") is committed to protecting your privacy. This Privacy Policy explains how we handle information when you use our application.',
             ),
-            _heading('1. Information ClipVaults Handles'),
+            _heading('1. Information MediaNest Handles'),
             _paragraph(
-              'ClipVaults is designed to keep downloaded and selected media on your device. The app may create an anonymous Firebase authentication identifier so Cloud Vault Pro can associate your files with your installation. This identifier is not used as your name, email, phone number, or advertising profile.',
+              'MediaNest is designed to keep downloaded and selected media on your device. The app may create an anonymous Firebase authentication identifier so Cloud Vault Pro can associate your files with your installation. This identifier is not used as your name, email, phone number, or advertising profile.',
             ),
             _bullet('Downloaded, edited, and Private Vault files remain on your device unless you explicitly upload them to Cloud Vault Pro'),
             _bullet('The app does not sell personal data or display third-party advertising'),
@@ -40,11 +40,11 @@ class PrivacyPolicyScreen extends StatelessWidget {
             _heading('2. Permissions and User Choices'),
             _subheading('MediaStore and system pickers'),
             _paragraph(
-              'ClipVaults saves its own downloads through Android MediaStore. When you choose a local video for Quick Editor or Private Vault, Android’s system picker gives the app access to that selected item only.',
+              'MediaNest saves its own downloads through Android MediaStore. When you choose a local video for Quick Editor or Private Vault, Android’s system picker gives the app access to that selected item only.',
             ),
             _subheading('WhatsApp Status folder grant'),
             _paragraph(
-              'When you open WhatsApp Status, you may choose the WhatsApp Media or .Statuses folder through Android’s system folder picker. ClipVaults uses the persisted folder grant to read only image and video files in that selected folder. You can revoke the grant in Android settings at any time.',
+              'When you open WhatsApp Status, you may choose the WhatsApp Media or .Statuses folder through Android’s system folder picker. MediaNest uses the persisted folder grant to read only image and video files in that selected folder. You can revoke the grant in Android settings at any time.',
             ),
             _subheading('Notifications'),
             _paragraph(
@@ -53,7 +53,7 @@ class PrivacyPolicyScreen extends StatelessWidget {
 
             _heading('3. Third-Party Services'),
             _paragraph(
-              'When you request a download, ClipVaults may send the URL you entered to the configured media-extraction service so it can resolve a downloadable media address. Those services process URLs under their own privacy policies. Do not submit private or confidential URLs.',
+              'When you request a download, MediaNest may send the URL you entered to the configured media-extraction service so it can resolve a downloadable media address. Those services process URLs under their own privacy policies. Do not submit private or confidential URLs.',
             ),
             _paragraph(
               'If you use AI Coach or translation features, the text, transcript, or image you submit may be sent to the configured AI or translation provider to produce the requested result. Do not submit information you do not want processed by that provider.',
@@ -64,12 +64,12 @@ class PrivacyPolicyScreen extends StatelessWidget {
 
             _heading('4. Media Downloads'),
             _paragraph(
-              'ClipVaults is designed for downloading media for personal use. You are responsible for ensuring you have the right to download any content. Please respect the terms of service of the social media platforms you use and the intellectual property rights of content creators.',
+              'MediaNest is designed for downloading media for personal use. You are responsible for ensuring you have the right to download any content. Please respect the terms of service of the social media platforms you use and the intellectual property rights of content creators.',
             ),
 
             _heading('5. Children\'s Privacy'),
             _paragraph(
-              'ClipVaults is not directed at children under 13. We do not knowingly collect any information from children.',
+              'MediaNest is not directed at children under 13. We do not knowingly collect any information from children.',
             ),
 
             _heading('6. Data Security and Deletion'),
@@ -101,7 +101,7 @@ class PrivacyPolicyScreen extends StatelessWidget {
                   SizedBox(width: 12),
                   Expanded(
                     child: Text(
-                      'ClipVaults has no third-party ads and gives you control over local and cloud media.',
+                      'MediaNest has no third-party ads and gives you control over local and cloud media.',
                       style: TextStyle(
                         color: AppColors.success,
                         fontSize: 13,

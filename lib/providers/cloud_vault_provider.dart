@@ -369,16 +369,33 @@ class CloudVaultProvider extends ChangeNotifier {
       _statusMessage = 'Getting download URL...';
       notifyListeners();
 
+      // Download to device
+      final folder = file.isVideo ? 'Videos' : 'Pictures';
+      final downloadDir = '/storage/emulated/0/$folder/MediaNest/Cloud';
+      final localPath = '$downloadDir/${file.fileName}';
+
+      // Firebase Storage bills $0.12/GB on every download — re-fetching a
+      // file the person already has locally, just because they tapped it
+      // again, is pure wasted spend with zero benefit to them. If a file of
+      // the same name and size already exists at the expected local path,
+      // it's the same file — use it and skip the network entirely.
+      final existing = File(localPath);
+      if (await existing.exists()) {
+        final localSize = await existing.length();
+        if (localSize == file.fileSize && file.fileSize > 0) {
+          _statusMessage = 'Already downloaded';
+          _downloadProgress = 1.0;
+          _isDownloading = false;
+          notifyListeners();
+          return localPath;
+        }
+      }
+
       final ref = _storage.ref(file.storagePath);
       final downloadUrl = await ref.getDownloadURL();
 
       _statusMessage = 'Downloading...';
       notifyListeners();
-
-      // Download to device
-      final folder = file.isVideo ? 'Videos' : 'Pictures';
-      final downloadDir = '/storage/emulated/0/$folder/ClipVaults/Cloud';
-      final localPath = '$downloadDir/${file.fileName}';
 
       final dir = Directory(downloadDir);
       if (!await dir.exists()) {

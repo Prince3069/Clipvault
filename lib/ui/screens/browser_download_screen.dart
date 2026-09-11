@@ -31,7 +31,7 @@ class _BrowserDownloadScreenState extends State<BrowserDownloadScreen> {
   String? _lastError;
   bool _autoDownloadTriggered = false;
 
-  static const _cookieChannel = MethodChannel('clipvaults/cookies');
+  static const _cookieChannel = MethodChannel('MediaNest/cookies');
   static const _ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
       'AppleWebKit/537.36 (KHTML, like Gecko) '
       'Chrome/120.0.0.0 Safari/537.36';
@@ -189,9 +189,9 @@ class _BrowserDownloadScreenState extends State<BrowserDownloadScreen> {
       v.style.display = 'block';
     });
     // Inject CSS to override Facebook/LinkedIn container constraints
-    if (!document.getElementById('_clipvaults_css')) {
+    if (!document.getElementById('_MediaNest_css')) {
       var s = document.createElement('style');
-      s.id = '_clipvaults_css';
+      s.id = '_MediaNest_css';
       s.textContent = [
         'video { width:100%!important; max-height:85vh!important; display:block!important; }',
         '[data-pagelet="RightRail"] { display:none!important; }',
@@ -406,7 +406,7 @@ class _BrowserDownloadScreenState extends State<BrowserDownloadScreen> {
       final ext = candidate.url.contains('.webm') ? '.webm' : '.mp4';
       final filename =
           '${_platform}_${DateTime.now().millisecondsSinceEpoch}$ext';
-      final dir = Directory('/storage/emulated/0/Download/ClipVaults/$_platform');
+      final dir = Directory('/storage/emulated/0/Download/MediaNest/$_platform');
       await dir.create(recursive: true);
       final savePath = '${dir.path}/$filename';
       final minSize = _platform == 'twitter' ? 50 * 1024 : 80 * 1024;

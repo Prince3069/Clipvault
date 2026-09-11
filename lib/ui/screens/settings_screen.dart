@@ -1,5 +1,5 @@
 // ui/screens/settings_screen.dart
-// REBRANDED: ClipVault
+// REBRANDED: MediaNest
 // ADDED: Auto-sync to Cloud Vault toggle
 // ignore_for_file: use_build_context_synchronously
 
@@ -123,7 +123,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         Expanded(
           child:
               Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const Text('ClipVault',
+            const Text('MediaNest',
                 style: TextStyle(
                     color: Colors.white,
                     fontSize: 20,
@@ -175,7 +175,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               const Padding(
                 padding: EdgeInsets.fromLTRB(16, 14, 16, 10),
                 child: Text(
-                  'ClipVaults uses Android MediaStore for its own downloads and asks for a folder grant only inside WhatsApp Status. No broad storage, overlay, or accessibility permission is required for the core app.',
+                  'MediaNest uses Android MediaStore for its own downloads and asks for a folder grant only inside WhatsApp Status. No broad storage, overlay, or accessibility permission is required for the core app.',
                   style: TextStyle(
                       color: AppColors.textSecondary,
                       fontSize: 12,
@@ -379,7 +379,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _tile(
           icon: Icons.star_rounded,
           color: const Color(0xFFFFB300),
-          title: 'Rate ClipVault',
+          title: 'Rate MediaNest',
           sub: 'Help others find us on Play Store',
           onTap: () {},
         ),

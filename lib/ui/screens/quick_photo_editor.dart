@@ -1,9 +1,42 @@
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:image/image.dart' as img;
 
 import '../../services/storage_service.dart';
 import '../themes/app_theme.dart';
+
+/// Rotates and re-encodes an image file. Runs via compute() in its own
+/// isolate — decoding/encoding a full-resolution photo on the UI thread
+/// would freeze the app for a moment on anything but a tiny image.
+/// Top-level (not a method) because compute() requires that.
+Future<bool> _rotateAndSaveImage(_RotateJob job) async {
+  try {
+    final bytes = await File(job.sourcePath).readAsBytes();
+    final decoded = img.decodeImage(bytes);
+    if (decoded == null) return false;
+
+    final rotated = img.copyRotate(decoded, angle: job.degrees);
+
+    final ext = job.destPath.split('.').last.toLowerCase();
+    final encoded = ext == 'png'
+        ? img.encodePng(rotated)
+        : img.encodeJpg(rotated, quality: 92);
+
+    await File(job.destPath).writeAsBytes(encoded);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+class _RotateJob {
+  final String sourcePath;
+  final String destPath;
+  final int degrees;
+  const _RotateJob(this.sourcePath, this.destPath, this.degrees);
+}
 
 /// Lightweight, reliable photo destination for the shared media picker.
 /// Video-only operations remain in QuickClipEditor.
@@ -31,16 +64,42 @@ class _QuickPhotoEditorState extends State<QuickPhotoEditor> {
     setState(() => _saving = true);
     try {
       final source = File(widget.imagePath);
-      if (!await source.exists()) throw 'The selected photo is no longer available.';
+      if (!await source.exists())
+        throw 'The selected photo is no longer available.';
       final folder = await _storage.getPlatformDownloadPath('Edits');
-      final safeName = widget.imageTitle.replaceAll(RegExp(r'[^a-zA-Z0-9._-]'), '_');
-      final path = '$folder/edit_${DateTime.now().millisecondsSinceEpoch}_$safeName';
-      await source.copy(path);
+      final safeName =
+          widget.imageTitle.replaceAll(RegExp(r'[^a-zA-Z0-9._-]'), '_');
+      final path =
+          '$folder/edit_${DateTime.now().millisecondsSinceEpoch}_$safeName';
+
+      var rotationApplied = true;
+      if (_rotation == 0) {
+        // Nothing to bake in — a plain byte copy is correct and fast.
+        await source.copy(path);
+      } else {
+        final ok = await compute(
+          _rotateAndSaveImage,
+          _RotateJob(source.path, path, _rotation.round()),
+        );
+        if (!ok) {
+          // Decoding/encoding failed (corrupt file, unsupported format,
+          // etc.) — save the unrotated original rather than fail outright,
+          // but say plainly that the rotation didn't make it in.
+          rotationApplied = false;
+          await source.copy(path);
+        }
+      }
+
       await _storage.scanMediaFile(path);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Photo saved to your Edits folder.'),
-        backgroundColor: AppColors.success,
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(
+          rotationApplied
+              ? 'Photo saved to your Edits folder.'
+              : 'Saved, but the rotation could not be applied — original orientation was kept.',
+        ),
+        backgroundColor:
+            rotationApplied ? AppColors.success : AppColors.warning,
         behavior: SnackBarBehavior.floating,
       ));
     } catch (e) {

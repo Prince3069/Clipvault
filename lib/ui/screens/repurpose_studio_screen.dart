@@ -152,7 +152,7 @@ class _RepurposeStudioScreenState extends State<RepurposeStudioScreen> {
           child: const Icon(Icons.video_file_rounded, color: AppColors.primary),
         ),
         title: Text(item.fileName, maxLines: 1, overflow: TextOverflow.ellipsis),
-        subtitle: Text(item.sourceApp.isEmpty ? 'ClipVaults video' : item.sourceApp),
+        subtitle: Text(item.sourceApp.isEmpty ? 'MediaNest video' : item.sourceApp),
         trailing: const Icon(Icons.chevron_right_rounded),
       ),
     );

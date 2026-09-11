@@ -398,18 +398,18 @@ class NativeBridge {
     }
   }
 
-  /// Query durable ClipVaults files indexed by Android MediaStore.
-  static Future<List<Map<String, dynamic>>> queryClipVaultMedia() async {
+  /// Query durable MediaNest files indexed by Android MediaStore.
+  static Future<List<Map<String, dynamic>>> queryMediaNestMedia() async {
     try {
       final result = await _channel.invokeMethod<List<dynamic>>(
-        'queryClipVaultMedia',
+        'queryMediaNestMedia',
       );
       return (result ?? const <dynamic>[])
           .whereType<Map>()
           .map((item) => Map<String, dynamic>.from(item))
           .toList();
     } catch (e) {
-      print('❌ Error querying ClipVaults MediaStore: $e');
+      print('❌ Error querying MediaNest MediaStore: $e');
       return const <Map<String, dynamic>>[];
     }
   }
@@ -430,7 +430,7 @@ class NativeBridge {
     try {
       final Map<String, dynamic> params = {
         'sourcePath': sourcePath,
-        'destinationFolder': '/storage/emulated/0/Download/ClipVaults',
+        'destinationFolder': '/storage/emulated/0/Download/MediaNest',
       };
       final bool result =
           await _fileChannel.invokeMethod('downloadMedia', params);

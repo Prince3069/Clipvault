@@ -114,7 +114,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   Widget _buildTitle() {
     return Column(
       children: [
-        const Text('Setup ClipVaults',
+        const Text('Setup MediaNest',
             style: TextStyle(
                 color: AppColors.textPrimary,
                 fontSize: 26,
@@ -154,7 +154,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                       fontWeight: FontWeight.w800)),
               SizedBox(height: 8),
               Text(
-                'ClipVaults does not ask for broad storage, overlay, or accessibility access during setup. Downloads are saved through Android MediaStore. WhatsApp Status asks for one folder grant only when you open Status Saver.',
+                'MediaNest does not ask for broad storage, overlay, or accessibility access during setup. Downloads are saved through Android MediaStore. WhatsApp Status asks for one folder grant only when you open Status Saver.',
                 style: TextStyle(
                     color: AppColors.textSecondary, fontSize: 13, height: 1.55),
               ),
@@ -409,7 +409,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
               const SizedBox(height: 12),
               _guideStep(
                   '5',
-                  'Find "ClipVaults" in the list and enable it',
+                  'Find "MediaNest" in the list and enable it',
                   Icons.check_circle_outline,
                   AppColors.success),
 

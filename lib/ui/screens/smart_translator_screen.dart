@@ -130,6 +130,15 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
     if (_transcript.trim().isNotEmpty) {
       _detectLanguage();
     }
+
+    // Pulls the real balance from the backend so the badge in the AppBar
+    // shows something true, not a guess — see PremiumProvider.remainingCredits.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        Provider.of<PremiumProvider>(context, listen: false)
+            .refreshCreditBalance();
+      }
+    });
   }
 
   @override
@@ -153,7 +162,7 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
       if (!micStatus.isGranted) {
         setState(() => _error = micStatus.isPermanentlyDenied
             ? 'Microphone access is turned off for this app. Enable it in '
-                'Settings → Apps → ClipVault → Permissions.'
+                'Settings → Apps → MediaNest → Permissions.'
             : 'Microphone permission is needed for speech input.');
         return;
       }
@@ -183,6 +192,13 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
   Future<void> _detectLanguage() async {
     if (_transcript.isEmpty) return;
 
+    // Auto-detect is Pro-only. This runs automatically while typing/after
+    // speech, not from an explicit tap, so a free user shouldn't get a
+    // popup interrupting them mid-sentence — it just quietly doesn't run.
+    final isPremium =
+        Provider.of<PremiumProvider>(context, listen: false).isPremium;
+    if (!isPremium) return;
+
     setState(() {
       _isProcessing = true;
       _status = 'Detecting language...';
@@ -210,6 +226,13 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
   Future<void> _startListening() async {
     if (!_isInitialized) {
       setState(() => _error = 'Speech not initialized');
+      return;
+    }
+
+    final isPremium =
+        Provider.of<PremiumProvider>(context, listen: false).isPremium;
+    if (!isPremium) {
+      _showPremiumDialog();
       return;
     }
 
@@ -304,6 +327,12 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
         _progress = 1.0;
       });
 
+      // Refresh the badge so it reflects the translation that was just used.
+      if (mounted) {
+        Provider.of<PremiumProvider>(context, listen: false)
+            .refreshCreditBalance();
+      }
+
       // Track usage
       await _ai.trackEvent('translation_completed', properties: {
         'source': _sourceLanguage.code,
@@ -313,9 +342,14 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
       });
     } catch (e) {
       if (!mounted) return;
+      // ai_service.dart already extracts the server's real message (e.g.
+      // "Your free translation for this month is used — upgrade to Pro for
+      // unlimited, or wait until next month for another free one.") —
+      // showing that beats a generic "check your connection" message that
+      // hides exactly what happened and what to do about it.
+      final message = e.toString().replaceFirst('Exception: ', '');
       setState(() {
-        _error =
-            'Translation failed. Check your connection or translation API configuration.';
+        _error = message;
         _translation = '';
         _showTranslation = false;
         _isProcessing = false;
@@ -637,6 +671,44 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
         ],
       ),
       actions: [
+        Consumer<PremiumProvider>(
+          builder: (_, premium, __) {
+            final String? label;
+            if (premium.isPremium) {
+              final credits = premium.remainingCredits;
+              label = credits == null ? null : '$credits credits';
+            } else {
+              final remaining = premium.freeTranslationsRemaining;
+              label = remaining == null
+                  ? null
+                  : (remaining > 0 ? '$remaining free left' : 'Free used up');
+            }
+            if (label == null) return const SizedBox.shrink();
+            return Padding(
+              padding: const EdgeInsets.only(right: AppSpacing.sm),
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                decoration: BoxDecoration(
+                  color: premium.isPremium
+                      ? AppColors.primary.withValues(alpha: 0.12)
+                      : AppColors.warning.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    color: premium.isPremium
+                        ? AppColors.primary
+                        : AppColors.warning,
+                  ),
+                ),
+              ),
+            );
+          },
+        ),
         if (_transcript.isNotEmpty)
           IconButton(
             icon: const Icon(Icons.content_copy_rounded),
@@ -933,35 +1005,90 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
             ),
           ],
 
-          // Error
+          // Error — the "free translation used up" case gets a proper
+          // upgrade nudge instead of a scary red error, since it's not
+          // really an error, it's an expected limit with a clear next step.
           if (_error.isNotEmpty) ...[
             const SizedBox(height: AppSpacing.sm),
-            Container(
-              padding: const EdgeInsets.all(AppSpacing.sm),
-              decoration: BoxDecoration(
-                color: AppColors.error.withValues(alpha: 0.06),
-                borderRadius: BorderRadius.circular(AppRadius.md),
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.error_outline_rounded,
-                      color: AppColors.error, size: 16),
-                  const SizedBox(width: AppSpacing.sm),
-                  Expanded(
-                    child: Text(
-                      _error,
-                      style:
-                          const TextStyle(color: AppColors.error, fontSize: 13),
+            if (_error.toLowerCase().contains('free translation'))
+              Container(
+                padding: const EdgeInsets.all(AppSpacing.md),
+                decoration: BoxDecoration(
+                  color: AppColors.primary.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(AppRadius.md),
+                  border: Border.all(
+                      color: AppColors.primary.withValues(alpha: 0.25)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(Icons.workspace_premium_rounded,
+                            color: AppColors.primary, size: 18),
+                        const SizedBox(width: AppSpacing.sm),
+                        const Expanded(
+                          child: Text(
+                            'That was your free translation for this month',
+                            style: TextStyle(
+                              fontWeight: FontWeight.w700,
+                              color: AppColors.primary,
+                              fontSize: 13,
+                            ),
+                          ),
+                        ),
+                        GestureDetector(
+                          onTap: () => setState(() => _error = ''),
+                          child: const Icon(Icons.close_rounded,
+                              color: AppColors.primary, size: 16),
+                        ),
+                      ],
                     ),
-                  ),
-                  GestureDetector(
-                    onTap: () => setState(() => _error = ''),
-                    child: const Icon(Icons.close_rounded,
+                    const SizedBox(height: 6),
+                    const Text(
+                      'Go Pro for unlimited translation, or wait until next '
+                      'month for another free one.',
+                      style: TextStyle(
+                          fontSize: 12, color: AppColors.textSecondary),
+                    ),
+                    const SizedBox(height: AppSpacing.sm),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        onPressed: _showPremiumDialog,
+                        child: const Text('Upgrade to Pro'),
+                      ),
+                    ),
+                  ],
+                ),
+              )
+            else
+              Container(
+                padding: const EdgeInsets.all(AppSpacing.sm),
+                decoration: BoxDecoration(
+                  color: AppColors.error.withValues(alpha: 0.06),
+                  borderRadius: BorderRadius.circular(AppRadius.md),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.error_outline_rounded,
                         color: AppColors.error, size: 16),
-                  ),
-                ],
+                    const SizedBox(width: AppSpacing.sm),
+                    Expanded(
+                      child: Text(
+                        _error,
+                        style: const TextStyle(
+                            color: AppColors.error, fontSize: 13),
+                      ),
+                    ),
+                    GestureDetector(
+                      onTap: () => setState(() => _error = ''),
+                      child: const Icon(Icons.close_rounded,
+                          color: AppColors.error, size: 16),
+                    ),
+                  ],
+                ),
               ),
-            ),
           ],
         ],
       ),

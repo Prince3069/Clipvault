@@ -180,7 +180,7 @@ class VaultService {
     final ext = name.split('.').last.toLowerCase();
     final isVideo = ['mp4', 'webm', 'mov', 'mkv', '3gp', 'avi'].contains(ext);
     final folder = isVideo ? 'Videos' : 'Pictures';
-    final destDir = Directory('/storage/emulated/0/$folder/ClipVaults');
+    final destDir = Directory('/storage/emulated/0/$folder/MediaNest');
     await destDir.create(recursive: true);
     final dest = File('${destDir.path}/$name');
     await source.copy(dest.path);

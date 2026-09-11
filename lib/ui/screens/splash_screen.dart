@@ -111,7 +111,7 @@ class _SplashScreenState extends State<SplashScreen>
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(32),
                     child: Image.asset(
-                      'assets/branding/clipvault_logo.png',
+                      'assets/branding/MediaNest_logo.png',
                       fit: BoxFit.contain,
                       errorBuilder: (_, __, ___) => Image.asset(
                         'assets/icon/logo.png',
@@ -128,7 +128,7 @@ class _SplashScreenState extends State<SplashScreen>
               ),
               const SizedBox(height: 28),
               const Text(
-                'ClipVault',
+                'MediaNest',
                 style: TextStyle(
                   color: Colors.white,
                   fontSize: 34,

@@ -12,7 +12,7 @@ import 'quick_photo_editor.dart';
 
 /// A calm, gallery-first entry point for editing.
 ///
-/// The user sees recent ClipVaults media first and only opens Android's picker
+/// The user sees recent MediaNest media first and only opens Android's picker
 /// after explicitly choosing Photos or Videos. The picker is never opened as a
 /// folder tree by default.
 class QuickEditorPickerScreen extends StatefulWidget {
@@ -143,7 +143,7 @@ class _QuickEditorPickerScreenState extends State<QuickEditorPickerScreen> {
           ),
           SizedBox(height: 8),
           Text(
-            'Your latest ClipVaults downloads appear here first. Add a photo or video from your phone whenever you need it.',
+            'Your latest MediaNest downloads appear here first. Add a photo or video from your phone whenever you need it.',
             style: TextStyle(color: Colors.white70, height: 1.4),
           ),
         ],

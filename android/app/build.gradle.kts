@@ -16,7 +16,7 @@ if (keystorePropertiesFile.exists()) {
 }
 
 android {
-    namespace = "com.princedevlabs.all_social_downloader"
+    namespace = "com.princedevlabs.medianest"
     compileSdk = 36
 
     compileOptions {
@@ -30,13 +30,13 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.princedevlabs.all_social_downloader"
-        minSdk = 24
-        targetSdk = 36
-        versionCode = 8
-        versionName = "1.0.6"
-        multiDexEnabled = true
-    }
+    applicationId = "com.princedevlabs.medianest"
+    minSdk = 24
+    targetSdk = 36
+    versionCode = 1
+    versionName = "1.0.0"
+    multiDexEnabled = true
+}
 
     signingConfigs {
         create("release") {
@@ -84,7 +84,6 @@ dependencies {
     implementation("com.google.firebase:firebase-firestore")
     implementation("com.google.firebase:firebase-storage")
     implementation("androidx.multidex:multidex:2.0.1")
-    // ⬇️ ADD THIS LINE ⬇️
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 }
 

@@ -68,4 +68,73 @@ async function verifyAndConsumePurchase(productId, purchaseToken) {
   return {valid: true};
 }
 
-module.exports = {verifyAndConsumePurchase, PACKAGE_NAME};
+/**
+ * Confirms a SUBSCRIPTION purchase is real and active, returning Google's
+ * own record of its expiry time — never the client's. This is the missing
+ * half of "payments happen on the backend": /redeemCreditPurchase already
+ * verified consumable purchases this way, but subscription purchases had
+ * NO server verification at all — the client just wrote premiumExpiry
+ * straight to Firestore based on its own local purchase callback. Anyone
+ * running a modified client (or just a Frida/Xposed hook faking a
+ * successful PurchaseDetails object) could grant themselves premium
+ * forever without paying a cent, because nothing ever checked with Google.
+ *
+ * subscriptionState values that count as genuinely active:
+ * SUBSCRIPTION_STATE_ACTIVE, SUBSCRIPTION_STATE_IN_GRACE_PERIOD.
+ *
+ * @returns {Promise<{valid: boolean, reason?: string, expiryTime?: Date}>}
+ */
+async function verifySubscriptionPurchase(productId, purchaseToken) {
+  const publisher = await getAndroidPublisher();
+
+  let sub;
+  try {
+    sub = await publisher.purchases.subscriptionsv2.get({
+      packageName: PACKAGE_NAME,
+      token: purchaseToken,
+    });
+  } catch (e) {
+    return {valid: false, reason: `Play verification request failed: ${e.message}`};
+  }
+
+  const data = sub.data;
+  const state = data.subscriptionState;
+  const validStates = ["SUBSCRIPTION_STATE_ACTIVE", "SUBSCRIPTION_STATE_IN_GRACE_PERIOD"];
+  if (!validStates.includes(state)) {
+    return {valid: false, reason: `subscriptionState=${state}`};
+  }
+
+  // Confirm the line item actually matches the product this user claims
+  // to have bought — otherwise someone could send a real token for a
+  // cheaper product while claiming to have bought a pricier one.
+  const lineItem = (data.lineItems || []).find(
+    (item) => item.productId === productId,
+  );
+  if (!lineItem) {
+    return {valid: false, reason: "productId does not match this purchase token"};
+  }
+
+  const expiryTime = lineItem.expiryTime ? new Date(lineItem.expiryTime) : null;
+  if (!expiryTime || expiryTime.getTime() <= Date.now()) {
+    return {valid: false, reason: "Subscription has already expired"};
+  }
+
+  try {
+    await publisher.purchases.subscriptionsv2.acknowledge({
+      packageName: PACKAGE_NAME,
+      token: purchaseToken,
+    });
+  } catch (e) {
+    // Already-acknowledged is fine — Firestore idempotency (a stored
+    // purchaseToken per user) is the real guard against double-processing,
+    // this is a secondary safety net at the Play level, same pattern as
+    // the "already consumed" tolerance below for consumables.
+    if (!String(e.message || "").toLowerCase().includes("acknowledg")) {
+      console.error("Subscription acknowledge failed:", e.message);
+    }
+  }
+
+  return {valid: true, expiryTime};
+}
+
+module.exports = {verifyAndConsumePurchase, verifySubscriptionPurchase, PACKAGE_NAME};

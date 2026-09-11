@@ -16,14 +16,14 @@ class StorageService {
     try {
       if (Platform.isAndroid) {
         final dir =
-            Directory('/storage/emulated/0/Download/ClipVaults/$subFolder');
+            Directory('/storage/emulated/0/Download/MediaNest/$subFolder');
         if (!await dir.exists()) {
           await dir.create(recursive: true);
         }
         return dir.path;
       } else {
         final dir = await getApplicationDocumentsDirectory();
-        final folder = Directory('${dir.path}/ClipVaults/$subFolder');
+        final folder = Directory('${dir.path}/MediaNest/$subFolder');
         if (!await folder.exists()) {
           await folder.create(recursive: true);
         }
@@ -31,7 +31,7 @@ class StorageService {
       }
     } catch (e) {
       final dir = await getApplicationDocumentsDirectory();
-      final folder = Directory('${dir.path}/ClipVaults/$subFolder');
+      final folder = Directory('${dir.path}/MediaNest/$subFolder');
       if (!await folder.exists()) {
         await folder.create(recursive: true);
       }
@@ -40,7 +40,7 @@ class StorageService {
   }
 
   Future<String> get publicDownloadsDirectory async {
-    const String publicPath = '/storage/emulated/0/Download/ClipVaults';
+    const String publicPath = '/storage/emulated/0/Download/MediaNest';
     final Directory dir = Directory(publicPath);
     if (!await dir.exists()) {
       await dir.create(recursive: true);

@@ -135,7 +135,7 @@ class MediaProvider extends ChangeNotifier {
       // Modern Android owns public downloads through MediaStore. Query those
       // rows first so the Library survives process restarts and does not depend
       // on raw directory traversal or broad storage permission.
-      final indexedRows = await NativeBridge.queryClipVaultMedia();
+      final indexedRows = await NativeBridge.queryMediaNestMedia();
       if (indexedRows.isNotEmpty) {
         final indexed = indexedRows.map((row) {
           final path = (row['path'] as String?) ?? '';
@@ -166,8 +166,8 @@ class MediaProvider extends ChangeNotifier {
       }
 
       const downloadBases = [
-        '/storage/emulated/0/Download/ClipVaults',
-        // Backward compatibility for files saved by older ClipVault builds.
+        '/storage/emulated/0/Download/MediaNest',
+        // Backward compatibility for files saved by older MediaNest builds.
         '/storage/emulated/0/Download/SaveIt',
       ];
       final entities = <FileSystemEntity>[];
@@ -250,7 +250,7 @@ class MediaProvider extends ChangeNotifier {
     }
   }
 
-  /// Download a media file (copy to Downloads/ClipVaults via MediaStore).
+  /// Download a media file (copy to Downloads/MediaNest via MediaStore).
   ///
   /// Idempotent: WhatsApp status items are backed by a cached copy of the
   /// status file that the native side deletes once it's been permanently
