@@ -1,6 +1,6 @@
 {
-  "name": "clipvault-functions",
-  "description": "ClipVault Cloud Functions backend — AI proxy, credits, premium checks",
+  "name": "medianest-functions",
+  "description": "MediaNest Cloud Functions backend — AI proxy, credits, premium checks",
   "engines": {
     "node": "20"
   },

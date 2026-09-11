@@ -1,9 +1,9 @@
 // ui/widgets/premium/recent_activity_list.dart
 // Recent Downloads Activity List
 
-import 'package:all_social_downloader/models/download_item.dart';
-import 'package:all_social_downloader/providers/download_provider.dart';
 import 'package:flutter/material.dart';
+import 'package:medianest/models/download_item.dart';
+import 'package:medianest/providers/download_provider.dart';
 import 'package:provider/provider.dart';
 // import '../../models/download_item.dart';
 // import '../../providers/download_provider.dart';

@@ -1,11 +1,15 @@
 // ui/widgets/premium/creator_stats_card.dart
 // Statistics Card showing downloads, storage, etc.
 
-import 'package:all_social_downloader/models/download_item.dart';
-import 'package:all_social_downloader/providers/download_provider.dart';
-import 'package:all_social_downloader/providers/media_provider.dart';
-import 'package:all_social_downloader/providers/premium_provider.dart';
+// import 'package:all_social_downloader/models/download_item.dart';
+// import 'package:all_social_downloader/providers/download_provider.dart';
+// import 'package:all_social_downloader/providers/media_provider.dart';
+// import 'package:all_social_downloader/providers/premium_provider.dart';
 import 'package:flutter/material.dart';
+import 'package:medianest/models/download_item.dart';
+import 'package:medianest/providers/download_provider.dart';
+import 'package:medianest/providers/media_provider.dart';
+import 'package:medianest/providers/premium_provider.dart';
 import 'package:provider/provider.dart';
 
 import '../../themes/app_theme.dart';

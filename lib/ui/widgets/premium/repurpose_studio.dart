@@ -4,11 +4,11 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:all_social_downloader/ui/screens/premium_screen.dart';
-import 'package:all_social_downloader/ui/screens/buy_credits_screen.dart';
-import 'package:all_social_downloader/ui/themes/app_theme.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:medianest/ui/screens/buy_credits_screen.dart';
+import 'package:medianest/ui/screens/premium_screen.dart';
+import 'package:medianest/ui/themes/app_theme.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../../services/ai_service.dart';

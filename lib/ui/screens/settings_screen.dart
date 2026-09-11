@@ -3,9 +3,11 @@
 // ADDED: Auto-sync to Cloud Vault toggle
 // ignore_for_file: use_build_context_synchronously
 
-import 'package:all_social_downloader/ui/screens/cloud_vault_screen.dart';
-import 'package:all_social_downloader/ui/screens/premium_screen.dart';
+// import 'package:all_social_downloader/ui/screens/cloud_vault_screen.dart';
+// import 'package:all_social_downloader/ui/screens/premium_screen.dart';
 import 'package:flutter/material.dart';
+import 'package:medianest/ui/screens/cloud_vault_screen.dart';
+import 'package:medianest/ui/screens/premium_screen.dart';
 import 'package:provider/provider.dart';
 import '../../providers/settings_provider.dart';
 import '../../providers/premium_provider.dart';
@@ -281,7 +283,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
               icon: Icons.cloud_upload_rounded,
               color: isPremium ? AppColors.secondary : AppColors.textMuted,
               title: 'Cloud Vault Pro',
-              sub: isPremium ? '0.0 GB / 3.0 GB used' : '3GB synced storage · Pro',
+              sub: isPremium
+                  ? '0.0 GB / 3.0 GB used'
+                  : '3GB synced storage · Pro',
               onTap: isPremium
                   ? () {
                       // Navigate to Cloud Vault

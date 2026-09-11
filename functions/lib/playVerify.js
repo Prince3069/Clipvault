@@ -13,7 +13,7 @@
 const {google} = require("googleapis");
 
 // Update this if your applicationId ever changes.
-const PACKAGE_NAME = "com.princedevlabs.all_social_downloader";
+const PACKAGE_NAME = "com.princedevlabs.medianest";
 
 async function getAndroidPublisher() {
   const auth = new google.auth.GoogleAuth({
