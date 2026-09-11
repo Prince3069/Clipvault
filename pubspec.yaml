@@ -1,8 +1,8 @@
-name: all_social_downloader
-description: "SaveIt — Download videos from any platform for offline viewing."
+name: medianest
+description: "MediaNest — Capture, organize, translate, and reuse your content, all in one place."
 publish_to: 'none'
 
-version: 1.0.7+9
+version: 1.0.0+1
 
 environment:
   sdk: ">=3.0.0 <4.0.0"

@@ -1,5 +1,5 @@
 // MainActivity.kt - COMPLETE FIXED VERSION with proper WhatsApp Status access
-package com.princedevlabs.all_social_downloader
+package com.princedevlabs.medianest
 
 import android.Manifest
 import android.content.ClipData

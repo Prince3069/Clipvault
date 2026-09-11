@@ -1,4 +1,4 @@
-// android/build.gradle.kts - CLIPVAULT ONLY
+// android/build.gradle.kts - MEDIANEST
 
 buildscript {
     repositories {

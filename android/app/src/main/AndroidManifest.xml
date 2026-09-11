@@ -1,5 +1,5 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.princedevlabs.all_social_downloader"
+    package="com.princedevlabs.medianest"
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
@@ -12,7 +12,7 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <application
-        android:label="ClipVault"
+        android:label="MediaNest"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
             android:usesCleartextTraffic="false">
