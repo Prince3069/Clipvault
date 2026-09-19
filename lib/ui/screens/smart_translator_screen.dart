@@ -162,7 +162,7 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
       if (!micStatus.isGranted) {
         setState(() => _error = micStatus.isPermanentlyDenied
             ? 'Microphone access is turned off for this app. Enable it in '
-                'Settings → Apps → MediaNest → Permissions.'
+                'Settings → Apps → ClipVault → Permissions.'
             : 'Microphone permission is needed for speech input.');
         return;
       }
@@ -355,6 +355,11 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
         _isProcessing = false;
         _status = '';
       });
+      // Refresh the badge either way — the server no longer spends a free
+      // credit on a failed attempt, but the badge should never sit stale
+      // showing a number that doesn't match what the server actually has.
+      Provider.of<PremiumProvider>(context, listen: false)
+          .refreshCreditBalance();
     }
   }
 

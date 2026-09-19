@@ -1,5 +1,5 @@
 // services/ai_service.dart
-// COMPLETE - All AI features for MediaNest
+// COMPLETE - All AI features for ClipVault
 // Handles: AI Tagging, Captions, Hashtags, Subtitles, Translation, Summarization
 
 import 'dart:convert';
@@ -338,18 +338,25 @@ class AIService {
     try {
       final token = await _getIdToken();
 
-      final response = await http.post(
-        Uri.parse('$_baseUrl/translateText'),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
-        },
-        body: jsonEncode({
-          'text': text,
-          'targetLanguage': targetLanguage,
-          'sourceLanguage': sourceLanguage ?? '',
-        }),
-      );
+      final response = await http
+          .post(
+            Uri.parse('$_baseUrl/translateText'),
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': 'Bearer $token',
+            },
+            body: jsonEncode({
+              'text': text,
+              'targetLanguage': targetLanguage,
+              'sourceLanguage': sourceLanguage ?? '',
+            }),
+          )
+          .timeout(
+            const Duration(seconds: 30),
+            onTimeout: () => throw Exception(
+              'The translation service took too long to respond — please try again.',
+            ),
+          );
 
       if (response.statusCode != 200) {
         String message = 'Translation failed';

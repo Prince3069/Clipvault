@@ -26,6 +26,7 @@ class MediaProvider extends ChangeNotifier {
     all.sort((a, b) => b.viewedAt.compareTo(a.viewedAt));
     return all.take(10).toList();
   }
+
   List<MediaFile> get whatsappImages => List.unmodifiable(_whatsappImages);
   List<MediaFile> get whatsappVideos => List.unmodifiable(_whatsappVideos);
   bool get hasPermissions => _hasPermissions;
@@ -41,7 +42,8 @@ class MediaProvider extends ChangeNotifier {
     try {
       final ps = PermissionService();
       final state = await ps.getPermissionState();
-      final statusFolderAccess = await WhatsAppService().hasStatusFolderAccess();
+      final statusFolderAccess =
+          await WhatsAppService().hasStatusFolderAccess();
       // Allow if normal storage, all-files, or the persisted WhatsApp SAF tree is available.
       _hasPermissions =
           state.canAccessFiles || state.manageStorage || statusFolderAccess;
@@ -124,7 +126,8 @@ class MediaProvider extends ChangeNotifier {
       print('Error loading WhatsApp statuses: $e');
       _whatsappImages.clear();
       _whatsappVideos.clear();
-      _whatsappError = 'Could not read the selected WhatsApp folder. Tap Retry.';
+      _whatsappError =
+          'Could not read the selected WhatsApp folder. Tap Retry.';
       notifyListeners();
     }
   }
@@ -135,28 +138,32 @@ class MediaProvider extends ChangeNotifier {
       // Modern Android owns public downloads through MediaStore. Query those
       // rows first so the Library survives process restarts and does not depend
       // on raw directory traversal or broad storage permission.
-      final indexedRows = await NativeBridge.queryMediaNestMedia();
+      final indexedRows = await NativeBridge.queryClipVaultMedia();
       if (indexedRows.isNotEmpty) {
-        final indexed = indexedRows.map((row) {
-          final path = (row['path'] as String?) ?? '';
-          final fileName = (row['fileName'] as String?) ?? 'media';
-          final createdMillis = (row['createdAt'] as num?)?.toInt() ?? 0;
-          return MediaFile(
-            id: (row['id'] as String?) ?? path.hashCode.toString(),
-            path: path,
-            fileName: fileName,
-            fileSize: (row['fileSize'] as num?)?.toInt() ?? 0,
-            isVideo: row['isVideo'] == true,
-            sourceApp: (row['sourceApp'] as String?) ?? _detectPlatformFromPath(path),
-            createdAt: createdMillis > 0
-                ? DateTime.fromMillisecondsSinceEpoch(createdMillis)
-                : DateTime.now(),
-            viewedAt: createdMillis > 0
-                ? DateTime.fromMillisecondsSinceEpoch(createdMillis)
-                : DateTime.now(),
-            isDownloaded: true,
-          );
-        }).where((item) => item.path.isNotEmpty).toList();
+        final indexed = indexedRows
+            .map((row) {
+              final path = (row['path'] as String?) ?? '';
+              final fileName = (row['fileName'] as String?) ?? 'media';
+              final createdMillis = (row['createdAt'] as num?)?.toInt() ?? 0;
+              return MediaFile(
+                id: (row['id'] as String?) ?? path.hashCode.toString(),
+                path: path,
+                fileName: fileName,
+                fileSize: (row['fileSize'] as num?)?.toInt() ?? 0,
+                isVideo: row['isVideo'] == true,
+                sourceApp: (row['sourceApp'] as String?) ??
+                    _detectPlatformFromPath(path),
+                createdAt: createdMillis > 0
+                    ? DateTime.fromMillisecondsSinceEpoch(createdMillis)
+                    : DateTime.now(),
+                viewedAt: createdMillis > 0
+                    ? DateTime.fromMillisecondsSinceEpoch(createdMillis)
+                    : DateTime.now(),
+                isDownloaded: true,
+              );
+            })
+            .where((item) => item.path.isNotEmpty)
+            .toList();
         indexed.sort((a, b) => b.createdAt.compareTo(a.createdAt));
         _allMedia
           ..clear()
@@ -166,8 +173,8 @@ class MediaProvider extends ChangeNotifier {
       }
 
       const downloadBases = [
-        '/storage/emulated/0/Download/MediaNest',
-        // Backward compatibility for files saved by older MediaNest builds.
+        '/storage/emulated/0/Download/ClipVaults',
+        // Backward compatibility for files saved by older ClipVault builds.
         '/storage/emulated/0/Download/SaveIt',
       ];
       final entities = <FileSystemEntity>[];
@@ -222,7 +229,8 @@ class MediaProvider extends ChangeNotifier {
           : (ext == 'png' ? 'image/png' : 'image/jpeg');
       final publicPath = await NativeBridge.saveToMediaStore(
         sourcePath: source.path,
-        fileName: 'shared_${DateTime.now().millisecondsSinceEpoch}_${name.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_')}',
+        fileName:
+            'shared_${DateTime.now().millisecondsSinceEpoch}_${name.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_')}',
         platform: 'Shared',
         mimeType: mimeType,
       );
@@ -250,7 +258,7 @@ class MediaProvider extends ChangeNotifier {
     }
   }
 
-  /// Download a media file (copy to Downloads/MediaNest via MediaStore).
+  /// Download a media file (copy to Downloads/ClipVaults via MediaStore).
   ///
   /// Idempotent: WhatsApp status items are backed by a cached copy of the
   /// status file that the native side deletes once it's been permanently
@@ -276,7 +284,8 @@ class MediaProvider extends ChangeNotifier {
 
       final platform = mediaFile.sourceApp.isEmpty
           ? 'WhatsApp'
-          : mediaFile.sourceApp[0].toUpperCase() + mediaFile.sourceApp.substring(1);
+          : mediaFile.sourceApp[0].toUpperCase() +
+              mediaFile.sourceApp.substring(1);
       final timestamp = DateTime.now().millisecondsSinceEpoch;
       final ext = mediaFile.path.contains('.')
           ? '.${mediaFile.path.split('.').last.toLowerCase()}'
@@ -292,11 +301,21 @@ class MediaProvider extends ChangeNotifier {
       );
 
       if (destPath == null || destPath.isEmpty) {
-        _lastDownloadError = NativeBridge.lastMediaStoreError ?? 'Unknown error';
+        _lastDownloadError =
+            NativeBridge.lastMediaStoreError ?? 'Unknown error';
         return false;
       }
 
       _markDownloaded(mediaFile.id);
+
+      // allMedia (what saved_screen.dart's folder counts read) is only
+      // ever populated by this native query — flipping isDownloaded above
+      // only updates the WhatsApp browse list, a completely separate list
+      // the Saved screen never looks at. Without this call, a real,
+      // successful save would sit invisible to the Saved tab until
+      // something else forced a fresh query (a pull-to-refresh, or the
+      // screen happening to remount) — which is exactly the bug reported.
+      await _loadDownloadedFiles();
       notifyListeners();
       return true;
     } catch (e) {
@@ -316,12 +335,14 @@ class MediaProvider extends ChangeNotifier {
     }
     final imgIdx = _whatsappImages.indexWhere((m) => m.id == id);
     if (imgIdx >= 0) {
-      _whatsappImages[imgIdx] = _whatsappImages[imgIdx].copyWith(isDownloaded: true);
+      _whatsappImages[imgIdx] =
+          _whatsappImages[imgIdx].copyWith(isDownloaded: true);
       return;
     }
     final vidIdx = _whatsappVideos.indexWhere((m) => m.id == id);
     if (vidIdx >= 0) {
-      _whatsappVideos[vidIdx] = _whatsappVideos[vidIdx].copyWith(isDownloaded: true);
+      _whatsappVideos[vidIdx] =
+          _whatsappVideos[vidIdx].copyWith(isDownloaded: true);
     }
   }
 
@@ -372,9 +393,19 @@ class MediaProvider extends ChangeNotifier {
 
   bool _isMediaFile(String path) {
     const exts = [
-      'jpg', 'jpeg', 'png', 'gif', 'webp',
-      'mp4', 'mov', 'avi', 'mkv', 'webm', '3gp',
-      'mp3', 'm4a',
+      'jpg',
+      'jpeg',
+      'png',
+      'gif',
+      'webp',
+      'mp4',
+      'mov',
+      'avi',
+      'mkv',
+      'webm',
+      '3gp',
+      'mp3',
+      'm4a',
     ];
     final ext = path.toLowerCase().split('.').last;
     return exts.contains(ext);

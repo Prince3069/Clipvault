@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- android/app/src/main/res/xml/backup_rules.xml -->
+<full-backup-content>
+    <!-- Exclude files that shouldn't be backed up -->
+    <exclude domain="sharedpref" path="flutter.*.xml"/>
+    <exclude domain="database" path="app_flutter"/>
+</full-backup-content>

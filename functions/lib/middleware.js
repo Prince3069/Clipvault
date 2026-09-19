@@ -90,27 +90,38 @@ async function checkAndConsumeCredit(uid, feature, dailyLimit) {
  * wait until next month," where a daily reset would give far more free
  * usage than intended.
  */
-async function checkAndConsumeMonthlyCredit(uid, feature, monthlyLimit) {
+/**
+ * Checks the monthly allowance WITHOUT spending it. Call this before
+ * attempting the AI call. Returns enough state to call
+ * consumeMonthlyCredit() afterward — only if the call actually succeeds.
+ */
+async function hasMonthlyCreditRemaining(uid, feature, monthlyLimit) {
   const db = admin.firestore();
   const month = new Date().toISOString().slice(0, 7); // "2026-09"
   const ref = db.collection("users").doc(uid).collection("aiCredits").doc(`${feature}_${month}`);
+  const snap = await ref.get();
+  const used = snap.exists ? snap.data().count || 0 : 0;
+  return {allowed: used < monthlyLimit, used, ref, month, feature};
+}
 
-  return db.runTransaction(async (tx) => {
-    const snap = await tx.get(ref);
-    const used = snap.exists ? snap.data().count || 0 : 0;
-    if (used >= monthlyLimit) return false;
-    tx.set(
-        ref,
-        {
-          count: used + 1,
-          feature,
-          month,
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        },
-        {merge: true},
-    );
-    return true;
-  });
+/**
+ * Actually spends one credit — call this ONLY after the AI call succeeded.
+ * A failed call (bad response, provider error, timeout) must never cost
+ * the person their monthly allowance — that was the bug: the old
+ * checkAndConsumeMonthlyCredit spent the credit up front, before knowing
+ * whether the call would even work, so a single flaky request could burn
+ * someone's one free translation for the month and give them nothing.
+ */
+async function consumeMonthlyCredit(check) {
+  await check.ref.set(
+    {
+      count: check.used + 1,
+      feature: check.feature,
+      month: check.month,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    },
+    {merge: true},
+  );
 }
 
 module.exports = {
@@ -118,5 +129,6 @@ module.exports = {
   attachPremiumStatus,
   requirePremium,
   checkAndConsumeCredit,
-  checkAndConsumeMonthlyCredit,
+  hasMonthlyCreditRemaining,
+  consumeMonthlyCredit,
 };

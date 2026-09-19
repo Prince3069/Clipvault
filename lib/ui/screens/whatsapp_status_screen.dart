@@ -283,6 +283,14 @@ class _WhatsAppStatusScreenState extends State<WhatsAppStatusScreen>
                         ),
                       ),
                     ),
+                    const Text(
+                      'Viewed a new status? Tap ↻ to refresh',
+                      style: TextStyle(
+                        color: AppColors.textMuted,
+                        fontSize: 10,
+                        fontStyle: FontStyle.italic,
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -695,7 +703,7 @@ class _WhatsAppStatusScreenState extends State<WhatsAppStatusScreen>
                           ),
                           SizedBox(height: 2),
                           Text(
-                            'Choose the WhatsApp Media folder once so MediaNest can read hidden statuses safely.',
+                            'Choose the WhatsApp Media folder once so ClipVault can read hidden statuses safely.',
                             style: TextStyle(
                               color: AppColors.textSecondary,
                               fontSize: 11,
@@ -794,7 +802,7 @@ class _WhatsAppStatusScreenState extends State<WhatsAppStatusScreen>
               ),
               const SizedBox(height: 10),
               const Text(
-                'View a WhatsApp status first, then return to MediaNest.\nGrant access once and this screen will refresh automatically.',
+                'View a WhatsApp status first, then return to ClipVault.\nGrant access once and this screen will refresh automatically.',
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   color: AppColors.textSecondary,

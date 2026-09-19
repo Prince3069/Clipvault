@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">All Social Downloader</string>
+    <string name="accessibility_service_description">Detects when you view media in social apps to help you download them</string>
+</resources>

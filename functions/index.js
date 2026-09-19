@@ -19,7 +19,7 @@ const admin = require("firebase-admin");
 const express = require("express");
 const cors = require("cors");
 
-const {requireAuth, attachPremiumStatus, checkAndConsumeCredit, checkAndConsumeMonthlyCredit} = require("./lib/middleware");
+const {requireAuth, attachPremiumStatus, checkAndConsumeCredit, hasMonthlyCreditRemaining, consumeMonthlyCredit} = require("./lib/middleware");
 const {chatComplete} = require("./lib/openai");
 const {runRepurposeAction, SUPPORTED_ACTIONS} = require("./lib/repurpose");
 const {
@@ -132,6 +132,7 @@ app.post(
         return res.status(400).json({error: "Text is too long (max 4000 characters)"});
       }
 
+      let freeCheck = null;
       if (req.isPremium) {
         const budget = await hasBudgetRemaining(req.user.uid);
         if (!budget.allowed) {
@@ -142,8 +143,8 @@ app.post(
           });
         }
       } else {
-        const allowed = await checkAndConsumeMonthlyCredit(req.user.uid, "translateText", LIMITS.translateText.free);
-        if (!allowed) {
+        freeCheck = await hasMonthlyCreditRemaining(req.user.uid, "translateText", LIMITS.translateText.free);
+        if (!freeCheck.allowed) {
           return res.status(429).json({
             error: "Your free translation for this month is used — upgrade to Pro for unlimited, or wait until next month for another free one.",
           });
@@ -158,8 +159,13 @@ app.post(
         temperature: 0.2,
       });
 
+      // Only spend anything once the call has actually succeeded — this
+      // line runs after chatComplete returns without throwing, so a
+      // provider error above never reaches here.
       if (req.isPremium) {
         await recordSpend(req.user.uid, usage);
+      } else if (freeCheck) {
+        await consumeMonthlyCredit(freeCheck);
       }
 
       const budgetAfter = req.isPremium ? await hasBudgetRemaining(req.user.uid) : null;
@@ -170,7 +176,12 @@ app.post(
       });
     } catch (e) {
       console.error("translateText error:", e);
-      res.status(502).json({error: "Translation service error — please try again"});
+      // e.message here is almost always OpenAI's own error text (bad key,
+      // rate limit, quota exceeded, etc.) — not a secret, and genuinely
+      // useful to see. Showing it instead of a fixed generic sentence is
+      // what actually lets a real problem get diagnosed without needing
+      // to go dig through Cloud Functions logs every single time.
+      res.status(502).json({error: `Translation service error: ${e.message || "please try again"}`});
     }
   },
 );
@@ -201,7 +212,7 @@ app.post(
       res.json({language: language || "Unknown"});
     } catch (e) {
       console.error("detectLanguage error:", e);
-      res.status(502).json({error: "Language detection service error"});
+      res.status(502).json({error: `Language detection error: ${e.message || "please try again"}`});
     }
   },
 );
@@ -247,7 +258,7 @@ app.post(
       });
     } catch (e) {
       console.error("processRepurposeAction error:", e);
-      res.status(502).json({error: "AI generation failed — please try again"});
+      res.status(502).json({error: `AI generation failed: ${e.message || "please try again"}`});
     }
   },
 );
