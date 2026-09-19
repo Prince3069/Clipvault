@@ -40,7 +40,7 @@ class PrivacyPolicyScreen extends StatelessWidget {
             _heading('2. Permissions and User Choices'),
             _subheading('MediaStore and system pickers'),
             _paragraph(
-              'MediaNest saves its own downloads through Android MediaStore. When you choose a local video for Quick Editor or Private Vault, Android’s system picker gives the app access to that selected item only.',
+              'MediaNest saves its own downloads through Android MediaStore. When you choose a local photo for Quick Editor, or a local photo or video for Private Vault, Android’s system picker gives the app access to that selected item only.',
             ),
             _subheading('WhatsApp Status folder grant'),
             _paragraph(

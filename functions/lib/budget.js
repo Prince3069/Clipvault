@@ -66,6 +66,16 @@ const TOPUP_BUDGET_FRACTION = 0.25;
 // a presentation layer — all real accounting stays in USD above this line.
 const CREDIT_VALUE_USD = 0.001; // 1 credit = $0.001, so 1000 credits = $1
 
+// What one branding/overlay use costs against a Pro user's TOP-UP balance,
+// once their included monthly count (BRANDING_INCLUDED_PER_MONTH_PRO, in
+// middleware.js) is used up. Deliberately just 1 credit ($0.001) — this
+// feature has no real cost behind it at all, so this number isn't
+// recovering a cost, it's pricing the VALUE of continued access once the
+// generous included amount is gone. Keep it small: the point of the
+// top-up fallback is "don't hard-stop a paying customer," not "extract
+// maximum credits for a free-to-you feature."
+const BRANDING_TOPUP_COST_USD = 0.001;
+
 function usdToCredits(usd) {
   return Math.max(0, Math.floor(usd / CREDIT_VALUE_USD));
 }
@@ -82,6 +92,20 @@ function usdToCredits(usd) {
 const PLAN_PRICE_USD = {
   monthly: 3.99,
   annual: 35.99,
+};
+
+// Monthly-EQUIVALENT price — what actually matters now that the budget
+// resets every calendar month (see getBudgetState's fix). Using the full
+// PLAN_PRICE_USD value directly as a MONTHLY budget for an annual
+// subscriber would have been a second, worse bug hiding inside the fix
+// for the first one: $35.99 * 0.30 given fresh every month, for 12
+// months, is $129.56/year in AI budget — nearly 12x the $10.80/year this
+// plan was actually priced to support. Dividing by 12 is what makes an
+// annual subscriber's monthly allowance the correct SLICE of what they
+// actually paid, not a fresh full year's worth every month.
+const MONTHLY_EQUIVALENT_PRICE_USD = {
+  monthly: PLAN_PRICE_USD.monthly,
+  annual: PLAN_PRICE_USD.annual / 12,
 };
 
 // One-off credit top-up packs — real Google Play consumable product IDs.
@@ -107,11 +131,21 @@ function estimateCostUsd(usage) {
  * Reads the user's current plan/premium status and this period's spend so
  * far, plus their persistent top-up balance (purchased credits carry over
  * across renewals — a user who paid for extra credits shouldn't lose them
- * just because their subscription renewed). "This period" is tracked by
- * comparing the user's current premiumExpiry against the expiry the budget
- * doc was last reset for — a renewal or new purchase changes premiumExpiry,
- * which is exactly the signal that a fresh period (and fresh subscription
- * allowance, though NOT the top-up balance) has started.
+ * just because their subscription renewed).
+ *
+ * "This period" is the calendar month (yyyy-mm) — NOT premiumExpiry, which
+ * was the bug here before this fix. premiumExpiry only actually CHANGES
+ * once a year for an annual subscriber, so anchoring the spend-reset to it
+ * meant an annual subscriber's AI allowance never reset during their whole
+ * year — spentUsd just kept accumulating against the SAME one-time budget
+ * (priceUsd * AI_BUDGET_FRACTION, computed once from the annual price)
+ * until the year was up. Monthly subscribers happened to look correct
+ * under the old logic only because their own premiumExpiry naturally
+ * rolls forward every month anyway — same bug, just invisible for that
+ * plan. Anchoring on the calendar month instead means both plans reset on
+ * the same, predictable monthly boundary — matching what was actually
+ * asked for ("if he uses up his monthly credits, he's told he's out until
+ * next month or a credit-pack purchase," for both monthly AND annual).
  */
 async function getBudgetState(uid) {
   const db = admin.firestore();
@@ -124,22 +158,31 @@ async function getBudgetState(uid) {
     ? userData.planId
     : null;
   const priceUsd = planId ? PLAN_PRICE_USD[planId] : 0;
+  // The monthly-equivalent price is what the BUDGET calculation actually
+  // needs — priceUsd itself stays the real, full price paid (used for
+  // display elsewhere), so nothing that shows "$3.99/mo" or "$35.99/yr"
+  // to a person needs to change.
+  const monthlyEquivalentPriceUsd = planId ? MONTHLY_EQUIVALENT_PRICE_USD[planId] : 0;
 
   const budgetRef = db.collection("users").doc(uid).collection("meta").doc("aiBudget");
   const budgetSnap = await budgetRef.get();
   const budgetData = budgetSnap.exists ? budgetSnap.data() : {};
 
-  const currentAnchor = premiumExpiry ? premiumExpiry.toISOString() : null;
+  // Calendar month, e.g. "2026-09" — same period key shape middleware.js
+  // already uses for hasMonthlyCreditRemaining, so this file and that one
+  // now agree on what "a month" means, not just each internally consistent
+  // with itself.
+  const currentAnchor = isPremium ? new Date().toISOString().slice(0, 7) : null;
   const storedAnchor = budgetData.periodAnchor || null;
 
   // Anchor mismatch (including "never set before") means this is either the
-  // first request of a fresh billing period or the very first request ever
+  // first request of a fresh calendar month or the very first request ever
   // — either way, the period's own spend total starts back at zero. The
   // top-up balance is untouched by this — it's not period-scoped.
   const spentUsd = currentAnchor === storedAnchor ? (budgetData.spentUsd || 0) : 0;
   const topUpBalanceUsd = budgetData.topUpBalanceUsd || 0;
 
-  const periodBudgetUsd = isPremium ? priceUsd * AI_BUDGET_FRACTION : 0;
+  const periodBudgetUsd = isPremium ? monthlyEquivalentPriceUsd * AI_BUDGET_FRACTION : 0;
   const periodRemainingUsd = Math.max(0, periodBudgetUsd - spentUsd);
   const remainingUsd = periodRemainingUsd + topUpBalanceUsd;
 
@@ -219,16 +262,49 @@ async function addTopUp(uid, budgetUsdToAdd) {
   });
 }
 
+/**
+ * Spends from the TOP-UP balance ONLY — never the period's real AI
+ * allowance (periodRemainingUsd/spentUsd). Exists specifically for the
+ * branding/overlay feature's paid tier past its included monthly count:
+ * that feature has zero real AI cost, so it must never draw from the
+ * pool translateText/Repurpose Studio depend on. recordSpend() above
+ * draws from the period allowance FIRST, which would be exactly wrong
+ * here — this is the version that guarantees it can't happen, by design,
+ * not by convention.
+ *
+ * @returns {Promise<{allowed: boolean, remainingTopUpUsd: number}>}
+ */
+async function spendFromTopUpOnly(uid, usdAmount) {
+  const db = admin.firestore();
+  const budgetRef = db.collection("users").doc(uid).collection("meta").doc("aiBudget");
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(budgetRef);
+    const current = snap.exists ? snap.data().topUpBalanceUsd || 0 : 0;
+    if (current < usdAmount) {
+      return {allowed: false, remainingTopUpUsd: current};
+    }
+    const remaining = current - usdAmount;
+    tx.set(
+      budgetRef,
+      {topUpBalanceUsd: remaining, updatedAt: admin.firestore.FieldValue.serverTimestamp()},
+      {merge: true},
+    );
+    return {allowed: true, remainingTopUpUsd: remaining};
+  });
+}
+
 module.exports = {
   getBudgetState,
   hasBudgetRemaining,
   recordSpend,
   addTopUp,
+  spendFromTopUpOnly,
   estimateCostUsd,
   usdToCredits,
   AI_BUDGET_FRACTION,
   TOPUP_BUDGET_FRACTION,
   CREDIT_VALUE_USD,
+  BRANDING_TOPUP_COST_USD,
   PLAN_PRICE_USD,
   CREDIT_PACKS,
 };

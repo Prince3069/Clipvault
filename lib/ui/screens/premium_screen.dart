@@ -226,10 +226,10 @@ class _PremiumScreenState extends State<PremiumScreen> {
               'Save and share statuses — photos and videos'),
           _buildFeatureItem(
               'Private Vault', 'PIN protected, with a decoy PIN option'),
-          _buildFeatureItem('Quick Clip Editor basics',
-              'Trim, rotate, change speed, extract a frame, extract audio, split'),
+          _buildFeatureItem('Brand Overlay',
+              '1 free branded photo export a month — your price, name & logo'),
           _buildFeatureItem(
-              'Translation', '1 free translation a day — text, speech & video'),
+              'Translation', '1 free translation a month — text, speech & video'),
           _buildFeatureItem('No ads. Ever.',
               'Not now, not later — that never changes on any plan'),
 
@@ -248,6 +248,8 @@ class _PremiumScreenState extends State<PremiumScreen> {
               'Cloud Vault Pro', '3GB synced storage across your devices'),
           _buildFeatureItem(
               'Auto-backup statuses', 'WhatsApp statuses saved automatically'),
+          _buildFeatureItem('Brand Overlay',
+              '30 branded photo exports a month — your price, name & logo, ready to post'),
           _buildFeatureItem('Repurpose Studio',
               'AI captions, hashtags, subtitles, scripts & more per clip'),
           _buildFeatureItem('Creator Coach',

@@ -124,6 +124,38 @@ async function consumeMonthlyCredit(check) {
   );
 }
 
+/**
+ * Checks and consumes the free tier's allowance (once/month) AND, for
+ * Pro, a separate generous monthly-included count — for the branding/
+ * overlay feature (Quick Edit's replacement). Deliberately NOT the same
+ * system as budget.js's AI dollar budget: that system exists to cap real,
+ * variable AI provider spend against subscription price. This feature has
+ * no such cost — the actual price/text/logo compositing happens entirely
+ * on the DEVICE (Canvas), not on this server at all, so there is nothing
+ * here to protect a dollar budget from. Routing it through budget.js
+ * anyway would risk a real problem: a Pro user who uses this feature
+ * heavily could exhaust the SAME pool translateText/Repurpose Studio draw
+ * from, starving real AI features to protect a feature that costs nothing.
+ * This is its own counter, on purpose.
+ *
+ * Free tier: 1/month (matches translateText's cadence).
+ * Pro tier: BRANDING_INCLUDED_PER_MONTH/month, then falls back to the
+ * user's purchased credit-pack balance (via budget.js) same as any other
+ * paid usage — Pro doesn't mean unlimited forever, it means a generous
+ * included amount, matching what was actually decided.
+ */
+const BRANDING_FREE_PER_MONTH = 1;
+const BRANDING_INCLUDED_PER_MONTH_PRO = 30; // generous — costs ~nothing to grant, since there's no AI spend behind it
+
+async function checkBrandingAllowance(uid, isPremium) {
+  if (!isPremium) {
+    const check = await hasMonthlyCreditRemaining(uid, "brandOverlay", BRANDING_FREE_PER_MONTH);
+    return {allowed: check.allowed, tier: "free", check};
+  }
+  const check = await hasMonthlyCreditRemaining(uid, "brandOverlayPro", BRANDING_INCLUDED_PER_MONTH_PRO);
+  return {allowed: check.allowed, tier: "pro_included", check};
+}
+
 module.exports = {
   requireAuth,
   attachPremiumStatus,
@@ -131,4 +163,7 @@ module.exports = {
   checkAndConsumeCredit,
   hasMonthlyCreditRemaining,
   consumeMonthlyCredit,
+  checkBrandingAllowance,
+  BRANDING_FREE_PER_MONTH,
+  BRANDING_INCLUDED_PER_MONTH_PRO,
 };

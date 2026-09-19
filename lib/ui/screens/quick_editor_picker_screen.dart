@@ -7,13 +7,14 @@ import 'package:provider/provider.dart';
 import '../../models/media_file.dart';
 import '../../providers/media_provider.dart';
 import '../themes/app_theme.dart';
-import 'quick_clip_editor.dart';
-import 'quick_photo_editor.dart';
+import 'brand_overlay_editor.dart';
 
-/// A calm, gallery-first entry point for editing.
+/// A calm, gallery-first entry point for the branding/overlay feature.
 ///
-/// The user sees recent MediaNest media first and only opens Android's picker
-/// after explicitly choosing Photos or Videos. The picker is never opened as a
+/// Video editing and frame extraction have been removed entirely — this
+/// tab is now exclusively the branded-photo export feature. The user sees
+/// recent MediaNest photos first and only opens Android's picker after
+/// explicitly tapping "Add photo". The picker is never opened as a
 /// folder tree by default.
 class QuickEditorPickerScreen extends StatefulWidget {
   const QuickEditorPickerScreen({Key? key}) : super(key: key);
@@ -37,47 +38,28 @@ class _QuickEditorPickerScreenState extends State<QuickEditorPickerScreen> {
     }
   }
 
-  Future<void> _pickVideo() async {
-    if (_picking) return;
-    setState(() => _picking = true);
-    try {
-      final file = await _picker.pickVideo(source: ImageSource.gallery);
-      if (file != null && mounted) _openVideo(file.path, file.name);
-    } finally {
-      if (mounted) setState(() => _picking = false);
-    }
-  }
-
   void _openMedia(MediaFile item) {
-    if (item.isVideo) {
-      _openVideo(item.path, item.fileName);
-    } else {
-      _openPhoto(item.path, item.fileName);
-    }
-  }
-
-  void _openVideo(String path, String title) {
-    Navigator.of(context).push(MaterialPageRoute(
-      builder: (_) => QuickClipEditor(videoPath: path, videoTitle: title),
-    ));
+    // Video items are filtered out of the recent-media grid entirely now
+    // (see _buildRecentGrid below) — this only ever receives photos.
+    _openPhoto(item.path, item.fileName);
   }
 
   void _openPhoto(String path, String title) {
     Navigator.of(context).push(MaterialPageRoute(
-      builder: (_) => QuickPhotoEditor(imagePath: path, imageTitle: title),
+      builder: (_) => BrandOverlayEditor(imagePath: path, imageTitle: title),
     ));
   }
 
   @override
   Widget build(BuildContext context) {
     final media = Provider.of<MediaProvider>(context);
-    final recent = [...media.allMedia]
+    final recent = [...media.allMedia.where((item) => !item.isVideo)]
       ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
 
     return Scaffold(
       backgroundColor: AppColors.bg,
       appBar: AppBar(
-        title: const Text('Quick Editor'),
+        title: const Text('Quick Edit'),
         backgroundColor: AppColors.bg,
         foregroundColor: AppColors.textPrimary,
         elevation: 0,
@@ -96,7 +78,7 @@ class _QuickEditorPickerScreenState extends State<QuickEditorPickerScreen> {
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 const Text(
-                  'Recent media',
+                  'Recent photos',
                   style: TextStyle(
                     color: AppColors.textPrimary,
                     fontSize: 18,
@@ -131,10 +113,10 @@ class _QuickEditorPickerScreenState extends State<QuickEditorPickerScreen> {
       child: const Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(Icons.auto_awesome_rounded, color: Colors.white, size: 30),
+          Icon(Icons.sell_rounded, color: Colors.white, size: 30),
           SizedBox(height: 12),
           Text(
-            'Choose something to create with',
+            'Turn any photo into a branded post',
             style: TextStyle(
               color: Colors.white,
               fontSize: 22,
@@ -143,7 +125,7 @@ class _QuickEditorPickerScreenState extends State<QuickEditorPickerScreen> {
           ),
           SizedBox(height: 8),
           Text(
-            'Your latest MediaNest downloads appear here first. Add a photo or video from your phone whenever you need it.',
+            'Add your price, business name and logo to any photo — ready to share in one tap.',
             style: TextStyle(color: Colors.white70, height: 1.4),
           ),
         ],
@@ -176,7 +158,7 @@ class _QuickEditorPickerScreenState extends State<QuickEditorPickerScreen> {
                 const SizedBox(width: 12),
                 const Expanded(
                   child: Text(
-                    'Add media',
+                    'Add a photo',
                     style: TextStyle(
                       color: AppColors.textPrimary,
                       fontSize: 17,
@@ -187,28 +169,17 @@ class _QuickEditorPickerScreenState extends State<QuickEditorPickerScreen> {
               ],
             ),
             const SizedBox(height: 14),
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: _picking ? null : _pickPhoto,
-                    icon: const Icon(Icons.photo_library_outlined),
-                    label: const Text('Photos'),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: _picking ? null : _pickVideo,
-                    icon: const Icon(Icons.video_library_outlined),
-                    label: const Text('Videos'),
-                  ),
-                ),
-              ],
+            OutlinedButton.icon(
+              onPressed: _picking ? null : _pickPhoto,
+              icon: const Icon(Icons.photo_library_outlined),
+              label: Text(_picking ? 'Opening picker…' : 'Choose a photo'),
+              style: OutlinedButton.styleFrom(
+                minimumSize: const Size(double.infinity, 44),
+              ),
             ),
             const SizedBox(height: 4),
             const Text(
-              'Opens your phone’s recent gallery. Downloads are included by Android Gallery when available.',
+              'Opens your phone’s gallery. Downloads are included by Android Gallery when available.',
               style: TextStyle(color: AppColors.textSecondary, fontSize: 12),
             ),
           ],

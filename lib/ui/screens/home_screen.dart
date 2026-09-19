@@ -786,7 +786,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             Expanded(
                 child: _commandTile(
                     'Quick Edit',
-                    'Edit downloaded or device videos',
+                    'Brand a photo with your price & logo',
                     Icons.tune_rounded,
                     const Color(0xFF8E75E8),
                     _openEditor)),

@@ -302,6 +302,47 @@ class AIService {
     }
   }
 
+  /// Checks — WITHOUT spending anything — whether the branding/overlay
+  /// feature (Quick Edit's replacement) can be used right now. Call this
+  /// before letting the user start compositing, so the paywall/limit
+  /// message shows up front rather than after they've already picked a
+  /// photo and set a price. See consumeBrandingUse() for the matching
+  /// call to make AFTER a successful local save.
+  Future<Map<String, dynamic>> checkBrandingAllowance() async {
+    final token = await _getIdToken();
+    final response = await http.get(
+      Uri.parse('$_baseUrl/checkBrandingAllowance'),
+      headers: {'Authorization': 'Bearer $token'},
+    );
+    if (response.statusCode != 200) {
+      throw Exception('Could not check branding allowance: ${response.body}');
+    }
+    return jsonDecode(response.body);
+  }
+
+  /// Records one branding/overlay use. Call this ONLY after the local
+  /// Canvas compositing + file save has actually succeeded — the server
+  /// re-checks the allowance itself rather than trusting the client, and
+  /// a failed local save must never cost the person their monthly
+  /// allowance, same discipline as translateText's own
+  /// check-then-consume-after-success shape.
+  ///
+  /// Throws on a 429 (allowance exhausted) with the server's real message
+  /// — the caller should catch this and show it, same pattern as
+  /// translation_service.dart does for translateText's own errors.
+  Future<Map<String, dynamic>> consumeBrandingUse() async {
+    final token = await _getIdToken();
+    final response = await http.post(
+      Uri.parse('$_baseUrl/consumeBrandingUse'),
+      headers: {'Authorization': 'Bearer $token'},
+    );
+    final body = jsonDecode(response.body) as Map<String, dynamic>;
+    if (response.statusCode != 200) {
+      throw Exception(body['error']?.toString() ?? 'Could not record branding use');
+    }
+    return body;
+  }
+
   /// Verify premium status
   Future<Map<String, dynamic>> verifyPremium() async {
     try {

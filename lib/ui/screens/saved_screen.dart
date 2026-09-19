@@ -19,7 +19,6 @@ import '../themes/app_theme.dart';
 import '../widgets/media_viewer_screen.dart';
 import 'cloud_vault_screen.dart' hide XFile;
 import 'premium_screen.dart';
-import 'quick_clip_editor.dart';
 
 // ─── Folder model ─────────────────────────────────────────────────────────────
 
@@ -975,25 +974,6 @@ class _SavedScreenState extends State<SavedScreen> {
               _open(item, media);
             },
           ),
-          if (item.isVideo)
-            ListTile(
-              leading: Container(
-                  width: 36,
-                  height: 36,
-                  decoration: BoxDecoration(
-                      color: AppColors.primary.withValues(alpha: 0.12),
-                      borderRadius: BorderRadius.circular(10)),
-                  child: const Icon(Icons.tune_rounded,
-                      color: AppColors.primary, size: 18)),
-              title: const Text('Open in Quick Editor',
-                  style: TextStyle(
-                      color: AppColors.textPrimary,
-                      fontWeight: FontWeight.w600)),
-              onTap: () {
-                Navigator.pop(context);
-                _openInEditor(item);
-              },
-            ),
           ListTile(
             leading: Container(
                 width: 36,
@@ -1054,23 +1034,6 @@ class _SavedScreenState extends State<SavedScreen> {
 
   // ─── Actions ──────────────────────────────────────────────────────────────
 
-  void _openInEditor(_FolderItem item) {
-    if (!item.isVideo || !File(item.path).existsSync()) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Video file not found')),
-      );
-      return;
-    }
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => QuickClipEditor(
-          videoPath: item.path,
-          videoTitle: item.filename,
-        ),
-      ),
-    );
-  }
 
   Future<void> _moveToPrivateVault(
       _FolderItem item, DownloadProvider dlProvider, MediaProvider media) async {

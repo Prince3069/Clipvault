@@ -19,16 +19,18 @@ const admin = require("firebase-admin");
 const express = require("express");
 const cors = require("cors");
 
-const {requireAuth, attachPremiumStatus, checkAndConsumeCredit, hasMonthlyCreditRemaining, consumeMonthlyCredit} = require("./lib/middleware");
+const {requireAuth, attachPremiumStatus, checkAndConsumeCredit, hasMonthlyCreditRemaining, consumeMonthlyCredit, checkBrandingAllowance, BRANDING_FREE_PER_MONTH, BRANDING_INCLUDED_PER_MONTH_PRO} = require("./lib/middleware");
 const {chatComplete} = require("./lib/openai");
 const {runRepurposeAction, SUPPORTED_ACTIONS} = require("./lib/repurpose");
 const {
   hasBudgetRemaining,
   recordSpend,
   addTopUp,
+  spendFromTopUpOnly,
   usdToCredits,
   CREDIT_PACKS,
   TOPUP_BUDGET_FRACTION,
+  BRANDING_TOPUP_COST_USD,
 } = require("./lib/budget");
 const {verifyAndConsumePurchase, verifySubscriptionPurchase} = require("./lib/playVerify");
 
@@ -116,6 +118,78 @@ app.get("/getAICredits", requireAuth, attachPremiumStatus, async (req, res) => {
     res.status(500).json({error: "Could not load AI credit usage"});
   }
 });
+
+// ─── Branding/overlay feature (Quick Edit's replacement) ────────────────
+// This feature's actual image compositing (price/text/logo over the
+// user's own photo) happens entirely on-device via Canvas — nothing here
+// touches an AI provider or costs real variable money, which is exactly
+// why it is NOT wired through budget.js's AI dollar-budget machinery.
+// These two routes exist purely to enforce the allowance server-side (a
+// client-only gate can always be bypassed by calling the API directly)
+// and to track usage, in the same check-before/consume-after-success
+// shape as /translateText — never spend the allowance for work that
+// didn't actually complete.
+app.get("/checkBrandingAllowance", requireAuth, attachPremiumStatus, async (req, res) => {
+  try {
+    const gate = await checkBrandingAllowance(req.user.uid, req.isPremium);
+    if (gate.allowed) {
+      return res.json({allowed: true, tier: gate.tier});
+    }
+    // Included allowance (free tier's 1/month, or Pro's monthly included
+    // count) is used up. Free tier has nowhere else to go but upgrade —
+    // credit packs require an active subscription first (enforced in
+    // /redeemCreditPurchase), matching the rule that free users can't buy
+    // their way past this. Pro users fall through to their top-up
+    // balance instead, checked without spending anything yet.
+    if (!req.isPremium) {
+      return res.json({
+        allowed: false,
+        tier: "free",
+        reason: "Your free use for this month is used. Upgrade to Pro for a monthly allowance, or wait until next month.",
+      });
+    }
+    const budget = await hasBudgetRemaining(req.user.uid, BRANDING_TOPUP_COST_USD);
+    if (budget.allowed) {
+      return res.json({allowed: true, tier: "topup", topUpCredits: usdToCredits(budget.topUpBalanceUsd)});
+    }
+    return res.json({
+      allowed: false,
+      tier: "pro_exhausted",
+      reason: "Your included uses for this month are used up. Buy a credit pack to keep going, or wait until next month.",
+    });
+  } catch (e) {
+    console.error("checkBrandingAllowance error:", e);
+    res.status(500).json({error: "Could not check branding allowance"});
+  }
+});
+
+app.post("/consumeBrandingUse", requireAuth, attachPremiumStatus, async (req, res) => {
+  try {
+    // Re-checks from scratch rather than trusting anything the client
+    // sends — the whole point of doing this server-side is that a client
+    // can't be trusted to self-report "yes I was allowed."
+    const gate = await checkBrandingAllowance(req.user.uid, req.isPremium);
+    if (gate.allowed) {
+      await consumeMonthlyCredit(gate.check);
+      return res.json({success: true, tier: gate.tier});
+    }
+    if (!req.isPremium) {
+      return res.status(429).json({error: "Your free use for this month is used."});
+    }
+    const spend = await spendFromTopUpOnly(req.user.uid, BRANDING_TOPUP_COST_USD);
+    if (!spend.allowed) {
+      return res.status(429).json({
+        error: "Your included uses for this month are used up, and there's no credit balance to fall back on. Buy a credit pack to keep going.",
+        canBuyCredits: true,
+      });
+    }
+    res.json({success: true, tier: "topup", topUpCredits: usdToCredits(spend.remainingTopUpUsd)});
+  } catch (e) {
+    console.error("consumeBrandingUse error:", e);
+    res.status(500).json({error: "Could not record branding use"});
+  }
+});
+
 
 // ─── Translate text (Smart Translator screen) ───────────────────────────
 app.post(
