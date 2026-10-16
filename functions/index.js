@@ -1,17 +1,13 @@
 // functions/index.js
 //
-// This deploys as a single Cloud Function named "apiV1" (2nd gen, HTTPS),
-// which is exactly the URL your Flutter app already calls:
-//   https://us-central1-social-downloader-2d02b.cloudfunctions.net/apiV1/...
-// Every route below is one of the paths ai_service.dart already builds —
-// nothing on the Flutter side needs to change for the endpoints implemented
-// here.
+// Single Cloud Function named "apiV1" (2nd gen, HTTPS) — matches the URL
+// ai_service.dart already builds. Every route below is one the Flutter
+// client already calls, plus two new Coach endpoints and (in this version)
+// returning the raw transcript from /analyzeVideo so the Smart Translator
+// Video tab can translate real speech instead of a summary.
 //
-// SECRETS: never hardcode API keys. They're declared with defineSecret()
-// below and read at request time via `openaiKey.value()`. See the bottom of
-// this file and the deployment guide for how to actually set their values —
-// they live in Google Secret Manager, not in this repo, not in git, not on
-// the device.
+// SECRETS: never hardcode API keys. Declared with defineSecret() and read
+// at request time via `openaiKey.value()`.
 
 const {onRequest} = require("firebase-functions/v2/https");
 const {defineSecret} = require("firebase-functions/params");
@@ -47,21 +43,13 @@ const crypto = require("crypto");
 /**
  * Analyzes a video the app has uploaded to its OWN private temp path
  * (users/{uid}/analysis_temp/…) — never a URL supplied by the client.
- * This is what actually fixes "Repurpose generates random content": the
- * AI now gets what is really said in the video, not just its title.
  *
- * Safety/margin properties, each deliberate:
- *  - The path must sit under the CALLER'S OWN uid prefix, so one user can
- *    never make the server read (or delete) another user's file.
- *  - Size is checked from metadata BEFORE downloading, so an oversized
- *    object is never pulled into memory.
- *  - Cached by a hash of the video's bytes, so running caption, then
- *    hashtags, then summary on the same video pays for transcription once.
- *  - Duration is read from the file before any paid call (see
- *    videoAnalysis.js), so one analysis can never cost more than
- *    MAX_ANALYSIS_MINUTES × the per-minute price — the same figure this
- *    function gates the budget on up front.
- *  - The temp file is always deleted, success or failure.
+ * Returns {analysisKey, summary, keyPhrases, transcript, durationMinutes}.
+ * The transcript is included because the Smart Translator Video tab needs
+ * the raw words to translate (a summary would lose them); Repurpose only
+ * reads summary/keyPhrases and ignores the transcript. Cached per unique
+ * video bytes, so analyzing the same video for Translator and then for
+ * Repurpose (or vice versa) only pays for Whisper once.
  */
 async function analyzeUploadedVideo(uid, storagePath, openaiKey) {
   const prefix = `users/${uid}/analysis_temp/`;
@@ -86,12 +74,18 @@ async function analyzeUploadedVideo(uid, storagePath, openaiKey) {
     const cached = await analysisRef.get();
     if (cached.exists) {
       const c = cached.data();
-      return {analysisKey, summary: c.summary, keyPhrases: c.keyPhrases, durationMinutes: c.durationMinutes};
+      return {
+        analysisKey,
+        summary: c.summary,
+        keyPhrases: c.keyPhrases,
+        // Legacy entries (analyzed before this version) may not have the
+        // transcript stored — return null in that case, which the client
+        // already tolerates.
+        transcript: c.transcript || null,
+        durationMinutes: c.durationMinutes,
+      };
     }
 
-    // Worst-case gate BEFORE any paid call: if even the maximum possible
-    // cost wouldn't fit in what's left of this person's AI budget, don't
-    // attempt it. (The 0.002 covers the small summary pass.)
     const worstCaseUsd = MAX_ANALYSIS_MINUTES * WHISPER_PRICE_PER_MINUTE_USD + 0.002;
     const gate = await hasBudgetRemaining(uid, worstCaseUsd);
     if (!gate.allowed) {
@@ -105,13 +99,21 @@ async function analyzeUploadedVideo(uid, storagePath, openaiKey) {
     const {summary, keyPhrases, usage} = await summarizeTranscript(openaiKey, transcript);
     await recordVideoAnalysisSpend(uid, durationMinutes, usage);
 
+    // Cap stored transcript at 50KB as a sanity guard (10-min video @150wpm
+    // is ~7.5KB, so this is only hit by pathological cases) — Firestore
+    // documents are capped at 1MB.
+    const safeTranscript = typeof transcript === "string" && transcript.length > 50000
+      ? transcript.slice(0, 50000)
+      : transcript;
+
     await analysisRef.set({
       summary,
       keyPhrases,
+      transcript: safeTranscript,
       durationMinutes,
       analyzedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
-    return {analysisKey, summary, keyPhrases, durationMinutes};
+    return {analysisKey, summary, keyPhrases, transcript: safeTranscript, durationMinutes};
   } finally {
     await file.delete().catch(() => {});
   }
@@ -121,11 +123,6 @@ admin.initializeApp();
 const db = admin.firestore();
 
 // ─── Secrets ────────────────────────────────────────────────────────────
-// Declaring all five now even though only OPENAI_API_KEY is used by the
-// routes below — Deepgram (speech-to-text/transcription), Replicate
-// (image/video generation), Anthropic and DeepSeek (alternate text models)
-// are wired up and ready for whichever feature you want to point at them
-// next, without having to touch the deployment config again.
 const openaiKey = defineSecret("OPENAI_API_KEY");
 const anthropicKey = defineSecret("ANTHROPIC_API_KEY");
 const deepseekKey = defineSecret("DEEPSEEK_API_KEY");
@@ -134,24 +131,17 @@ const deepgramKey = defineSecret("DEEPGRAM_API_KEY");
 
 const ALL_SECRETS = [openaiKey, anthropicKey, deepseekKey, replicateKey, deepgramKey];
 
-// ─── Free-tier daily limits ─────────────────────────────────────────────
-// Free users have no "price paid" to base a budget on, so they get a small
-// flat daily allowance instead — cheap enough that it's not worth abusing,
-// and a taste of the feature to convert to Pro.
-//
-// Premium users are NOT capped by a count here — they're capped by real
-// dollars spent, at 30% of what they actually paid, via lib/budget.js. See
-// the /getAICredits route for how remaining budget is reported to the app.
+// ─── Free-tier limits ────────────────────────────────────────────────────
 const LIMITS = {
-  translateText: {free: 1}, // per calendar MONTH, not per day — see checkAndConsumeMonthlyCredit
-  processRepurposeAction: {free: 0}, // Repurpose Studio is fully premium-gated
+  translateText: {free: 1}, // per calendar MONTH
+  processRepurposeAction: {free: 0}, // fully premium-gated
 };
 
 const app = express();
 app.use(cors({origin: true}));
 app.use(express.json({limit: "2mb"}));
 
-// ─── Health check — no auth, for uptime monitoring ─────────────────────
+// ─── Health check ────────────────────────────────────────────────────────
 app.get("/health", (req, res) => {
   res.json({status: "ok", time: new Date().toISOString()});
 });
@@ -161,7 +151,7 @@ app.get("/verifyPremium", requireAuth, attachPremiumStatus, (req, res) => {
   res.json({isPremium: req.isPremium});
 });
 
-// ─── AI credit usage (today / this billing period) ──────────────────────
+// ─── AI credit usage ─────────────────────────────────────────────────────
 app.get("/getAICredits", requireAuth, attachPremiumStatus, async (req, res) => {
   try {
     if (req.isPremium) {
@@ -180,8 +170,6 @@ app.get("/getAICredits", requireAuth, attachPremiumStatus, async (req, res) => {
     const features = Object.keys(LIMITS);
     const used = {};
     for (const feature of features) {
-      // translateText's free tier is monthly ("1 free, then wait until next
-      // month") — everything else in LIMITS still resets daily.
       const periodKey = feature === "translateText" ? month : today;
       const doc = await db
         .collection("users")
@@ -203,27 +191,12 @@ app.get("/getAICredits", requireAuth, attachPremiumStatus, async (req, res) => {
 });
 
 // ─── Branding/overlay feature (Quick Edit's replacement) ────────────────
-// This feature's actual image compositing (price/text/logo over the
-// user's own photo) happens entirely on-device via Canvas — nothing here
-// touches an AI provider or costs real variable money, which is exactly
-// why it is NOT wired through budget.js's AI dollar-budget machinery.
-// These two routes exist purely to enforce the allowance server-side (a
-// client-only gate can always be bypassed by calling the API directly)
-// and to track usage, in the same check-before/consume-after-success
-// shape as /translateText — never spend the allowance for work that
-// didn't actually complete.
 app.get("/checkBrandingAllowance", requireAuth, attachPremiumStatus, async (req, res) => {
   try {
     const gate = await checkBrandingAllowance(req.user.uid, req.isPremium);
     if (gate.allowed) {
       return res.json({allowed: true, tier: gate.tier});
     }
-    // Included allowance (free tier's 1/month, or Pro's monthly included
-    // count) is used up. Free tier has nowhere else to go but upgrade —
-    // credit packs require an active subscription first (enforced in
-    // /redeemCreditPurchase), matching the rule that free users can't buy
-    // their way past this. Pro users fall through to their top-up
-    // balance instead, checked without spending anything yet.
     if (!req.isPremium) {
       return res.json({
         allowed: false,
@@ -248,9 +221,6 @@ app.get("/checkBrandingAllowance", requireAuth, attachPremiumStatus, async (req,
 
 app.post("/consumeBrandingUse", requireAuth, attachPremiumStatus, async (req, res) => {
   try {
-    // Re-checks from scratch rather than trusting anything the client
-    // sends — the whole point of doing this server-side is that a client
-    // can't be trusted to self-report "yes I was allowed."
     const gate = await checkBrandingAllowance(req.user.uid, req.isPremium);
     if (gate.allowed) {
       await consumeMonthlyCredit(gate.check);
@@ -273,8 +243,7 @@ app.post("/consumeBrandingUse", requireAuth, attachPremiumStatus, async (req, re
   }
 });
 
-
-// ─── Translate text (Smart Translator screen) ───────────────────────────
+// ─── Translate text ─────────────────────────────────────────────────────
 app.post(
   "/translateText",
   requireAuth,
@@ -316,20 +285,12 @@ app.post(
         temperature: 0.2,
       });
 
-      // Only spend anything once the call has actually succeeded — this
-      // line runs after chatComplete returns without throwing, so a
-      // provider error above never reaches here.
       if (req.isPremium) {
         await recordSpend(req.user.uid, usage);
       } else if (freeCheck) {
         await consumeMonthlyCredit(freeCheck);
       }
 
-      // Server-authored, not client-claimed — this is what
-      // completeDailyChallenge actually checks for a "translate"
-      // challenge. Logged here, as a direct side effect of a real
-      // translation that just genuinely happened, rather than trusting
-      // whatever event name the client might send to /trackEvent.
       db.collection("users").doc(req.user.uid).collection("events").add({
         event: "translate_action_completed",
         properties: {targetLanguage},
@@ -344,19 +305,12 @@ app.post(
       });
     } catch (e) {
       console.error("translateText error:", e);
-      // e.message here is almost always OpenAI's own error text (bad key,
-      // rate limit, quota exceeded, etc.) — not a secret, and genuinely
-      // useful to see. Showing it instead of a fixed generic sentence is
-      // what actually lets a real problem get diagnosed without needing
-      // to go dig through Cloud Functions logs every single time.
       res.status(502).json({error: `Translation service error: ${e.message || "please try again"}`});
     }
   },
 );
 
 // ─── Detect language ─────────────────────────────────────────────────────
-// Pro-only, enforced here — a client-side-only gate can always be bypassed
-// by anyone calling this endpoint directly.
 app.post(
   "/detectLanguage",
   requireAuth,
@@ -399,7 +353,6 @@ app.post(
         });
       }
 
-      // Repurpose Studio is a premium feature end-to-end.
       if (!req.isPremium) {
         return res.status(402).json({error: "Upgrade to Pro to use Repurpose Studio"});
       }
@@ -412,13 +365,6 @@ app.post(
         });
       }
 
-      // The actual fix for "Repurpose generates random, unrelated
-      // content": when the app has already analyzed this video (see
-      // /analyzeVideo), feed the REAL transcript summary into the prompt
-      // instead of just the title. This reads a stored result — it never
-      // transcribes and never costs anything here, so it cannot fail in a
-      // way that blocks Repurpose; a missing/unknown key simply means
-      // title-only, exactly as before this feature existed.
       let videoSummary = null;
       let videoKeyPhrases = null;
       if (typeof analysisKey === "string" && /^[a-f0-9]{64}$/.test(analysisKey)) {
@@ -444,10 +390,6 @@ app.post(
       const spent = await recordSpend(req.user.uid, usage);
       const remainingUsd = Math.max(0, budget.remainingUsd - spent);
 
-      // Same reasoning as translateText above — a real, server-authored
-      // record that this feature was genuinely used, for
-      // completeDailyChallenge's "repurpose" verification to check
-      // against.
       db.collection("users").doc(req.user.uid).collection("events").add({
         event: "repurpose_action_completed",
         properties: {actionId},
@@ -466,10 +408,6 @@ app.post(
 );
 
 // ─── Redeem a purchased credit pack ─────────────────────────────────────
-// The client calls this right after a consumable purchase completes, with
-// the real Play purchase token. This is the ONLY place credits get added
-// to a top-up balance — everything here is designed so a person can't get
-// credited without Google Play itself confirming a real purchase happened.
 app.post("/redeemCreditPurchase", requireAuth, attachPremiumStatus, async (req, res) => {
   try {
     const {productId, purchaseToken} = req.body;
@@ -482,13 +420,6 @@ app.post("/redeemCreditPurchase", requireAuth, attachPremiumStatus, async (req, 
       return res.status(400).json({error: "Unknown credit pack productId"});
     }
 
-    // Credits only do anything for a Pro subscriber — translateText's free
-    // tier doesn't consult the budget/credit system at all. The client
-    // already blocks starting this purchase for a non-Pro user; this is
-    // the real enforcement, since a client-side check alone can always be
-    // bypassed. If this ever fires for real, the person has already paid
-    // Google — direct them to Play Store's own refund flow, since this
-    // server deliberately won't credit a purchase it can't account for.
     if (!req.isPremium) {
       return res.status(403).json({
         error: "Credits require an active Pro subscription. If you were " +
@@ -497,9 +428,6 @@ app.post("/redeemCreditPurchase", requireAuth, attachPremiumStatus, async (req, 
       });
     }
 
-    // Idempotency: the exact same purchase token can never be redeemed
-    // twice, even if this endpoint gets called more than once for it (a
-    // retry, a duplicate purchase-stream event on the client, etc.)
     const redemptionRef = db.collection("creditRedemptions").doc(purchaseToken);
     const already = await redemptionRef.get();
     if (already.exists) {
@@ -512,9 +440,6 @@ app.post("/redeemCreditPurchase", requireAuth, attachPremiumStatus, async (req, 
       return res.status(402).json({error: "Purchase could not be verified with Google Play"});
     }
 
-    // Same 30% rule as the subscription itself — what you actually charged
-    // times 0.25 is what gets added to spend on AI, guaranteeing this
-    // top-up can't be a worse deal for your margin than a subscription.
     const budgetUsdToAdd = pack.priceUsd * TOPUP_BUDGET_FRACTION;
     await addTopUp(req.user.uid, budgetUsdToAdd);
 
@@ -537,21 +462,9 @@ app.post("/redeemCreditPurchase", requireAuth, attachPremiumStatus, async (req, 
 });
 
 // ─── Verify and activate a subscription purchase ─────────────────────────
-// This is the piece that was missing entirely: the client used to write
-// premiumExpiry straight to Firestore based on nothing but its own local
-// purchase callback — Firestore security rules were the only thing
-// standing between a modified client and free premium forever, and rules
-// alone are the wrong place to enforce this. The server now verifies the
-// subscription directly with Google Play and uses GOOGLE'S OWN expiry
-// time, not anything the client claims, before writing anything.
 app.post("/verifySubscriptionPurchase", requireAuth, async (req, res) => {
   try {
     const {productId, purchaseToken} = req.body;
-    // This single line is the actual fix for the "we can't find his UID
-    // anywhere" problem — nothing in this route ever logged it before.
-    // Every attempt now carries it in the logs, so the NEXT one (success
-    // or failure) tells us exactly who it was, directly from Cloud
-    // Logging, instead of guessing at Firebase Console's Users list.
     console.log(`verifySubscriptionPurchase called by uid: ${req.user.uid}, productId: ${productId}`);
     if (!productId || !purchaseToken) {
       return res.status(400).json({error: "productId and purchaseToken are required"});
@@ -560,22 +473,15 @@ app.post("/verifySubscriptionPurchase", requireAuth, async (req, res) => {
       return res.status(400).json({error: "Unknown subscription productId"});
     }
 
-    // Idempotency: the same token can't re-trigger this repeatedly, same
-    // pattern as /redeemCreditPurchase.
     const activationRef = db.collection("subscriptionActivations").doc(purchaseToken);
     const already = await activationRef.get();
     if (already.exists) {
-      // Not an error — the client legitimately calls this again on every
-      // app start to keep itself in sync. Just return the stored result.
       const data = already.data();
       return res.json({success: true, expiryTime: data.expiryTime, planId: data.planId});
     }
 
     const verification = await verifySubscriptionPurchase(productId, purchaseToken);
     if (!verification.valid) {
-      // uid added here too — this is the exact line that fired for every
-      // one of his failed attempts so far, with no identity attached
-      // until now.
       console.error(`verifySubscriptionPurchase: verification failed for uid ${req.user.uid}:`, verification.reason);
       return res.status(402).json({error: "Subscription could not be verified with Google Play"});
     }
@@ -583,9 +489,6 @@ app.post("/verifySubscriptionPurchase", requireAuth, async (req, res) => {
     const planId = productId === "saveit_premium_monthly" ? "monthly" : "annual";
     const expiryTime = verification.expiryTime;
 
-    // The ONLY place premiumExpiry/planId get written now — server-side,
-    // using the Admin SDK, after Google itself confirmed the subscription
-    // is real and active. The client no longer writes this field at all.
     await db.collection("users").doc(req.user.uid).set(
       {
         premiumExpiry: admin.firestore.Timestamp.fromDate(expiryTime),
@@ -610,7 +513,7 @@ app.post("/verifySubscriptionPurchase", requireAuth, async (req, res) => {
   }
 });
 
-// ─── Library stats (AI Content Coach dashboard) ─────────────────────────
+// ─── Library stats ───────────────────────────────────────────────────────
 app.get("/getLibraryStats", requireAuth, async (req, res) => {
   try {
     const snapshot = await db
@@ -634,18 +537,10 @@ app.get("/getLibraryStats", requireAuth, async (req, res) => {
   }
 });
 
-// ─── Analytics event logging ─────────────────────────────────────────────
 // ─── AI Content Coach — real daily challenges ───────────────────────────
-//
-// Replaces a static, identical-for-everyone, finite hardcoded pool with
-// one real challenge generated per day, from the person's OWN niche
-// (now read fresh from Firestore every time, not a value frozen at
-// onboarding) and their actual streak length. Cached per calendar day so
-// opening this screen five times today doesn't generate — and charge
-// for — five different challenges.
 app.get("/getDailyChallenge", requireAuth, async (req, res) => {
   try {
-    const today = new Date().toISOString().slice(0, 10); // "2026-10-04"
+    const today = new Date().toISOString().slice(0, 10);
     const userRef = db.collection("users").doc(req.user.uid);
     const challengeRef = userRef.collection("coachChallenges").doc(today);
 
@@ -656,10 +551,6 @@ app.get("/getDailyChallenge", requireAuth, async (req, res) => {
 
     const userDoc = await userRef.get();
     const userData = userDoc.data() || {};
-    // coachNiche now lives in Firestore, not just local SharedPreferences
-    // — this is what actually makes "editing your niche later changes
-    // your challenges automatically" possible at all: a server-side
-    // generator can only react to a setting it can actually read.
     const niche = userData.coachNiche || "general content creation";
     const streakDays = userData.coachStreak || 0;
 
@@ -707,14 +598,6 @@ app.post("/completeDailyChallenge", requireAuth, async (req, res) => {
       return res.json({success: true, alreadyCompleted: true});
     }
 
-    // This is the actual fix for "you can just tap completed and it
-    // records it straight up": when a challenge maps to a real app
-    // feature (repurpose/translate/download), check that the feature
-    // was genuinely used TODAY before accepting completion — querying
-    // server-recorded events, not trusting a tap alone. A challenge with
-    // no mapped feature (a brainstorming/research task, say) has no
-    // real signal to check against and is accepted as an honest
-    // self-report, same as it always was for that kind of task.
     if (challenge.verifiable && challenge.verifyFeature) {
       const startOfDay = new Date(`${today}T00:00:00.000Z`);
       let verified = false;
@@ -724,8 +607,6 @@ app.post("/completeDailyChallenge", requireAuth, async (req, res) => {
           .where("timestamp", ">=", startOfDay).limit(1).get();
         verified = !downloads.empty;
       } else {
-        // repurpose / translate — both log through the general events
-        // collection; event names match what the client already sends.
         const eventName = challenge.verifyFeature === "repurpose"
           ? "repurpose_action_completed" : "translate_action_completed";
         const events = await userRef.collection("events")
@@ -759,11 +640,6 @@ app.post("/completeDailyChallenge", requireAuth, async (req, res) => {
 });
 
 // ─── AI Content Coach — profile (streak, points, niche, goal) ───────────
-// The client needs a single, cheap read to render its dashboard header
-// without firing the paid /getDailyChallenge call twice. Streak and points
-// live in Firestore (written by /completeDailyChallenge) — this just reads
-// them back. Also returns niche/goal/name so the coach screen can display
-// them after a reinstall, without depending on device-only SharedPreferences.
 app.get("/getCoachProfile", requireAuth, async (req, res) => {
   try {
     const doc = await db.collection("users").doc(req.user.uid).get();
@@ -782,11 +658,6 @@ app.get("/getCoachProfile", requireAuth, async (req, res) => {
 });
 
 // ─── AI Content Coach — save niche/goal/name ─────────────────────────────
-// Writes the person's profile fields to Firestore so the server-side
-// challenge generator (getDailyChallenge) can read a real niche instead of
-// falling back to "general content creation". Validation is deliberately
-// loose but bounded — this is user-authored free text that goes into an
-// LLM prompt, so cap the length and strip control chars.
 app.post("/saveCoachProfile", requireAuth, async (req, res) => {
   try {
     const {niche, goal, name} = req.body || {};
@@ -828,12 +699,11 @@ app.post("/trackEvent", requireAuth, async (req, res) => {
     res.json({success: true});
   } catch (e) {
     console.error("trackEvent error:", e);
-    // Analytics failures should never break the app experience.
     res.json({success: false});
   }
 });
 
-// ─── Download logging (feeds getLibraryStats/getDownloadStats) ─────────
+// ─── Download logging ───────────────────────────────────────────────────
 app.post("/logDownload", requireAuth, async (req, res) => {
   try {
     const {platform, fileName, isVideo} = req.body;
@@ -864,17 +734,12 @@ app.get("/getDownloadStats", requireAuth, async (req, res) => {
   }
 });
 
-// ─── Not yet implemented — the client tolerates a 501 gracefully, but this
-// is an honest placeholder, not a silent fake success. Come back to these
-// once the ones above are live and stable. ───────────────────────────────
+// ─── Not-yet-implemented placeholders ───────────────────────────────────
 const notImplemented = (name) => (req, res) => {
   res.status(501).json({error: `${name} is not implemented on the server yet`});
 };
 app.post("/analyzeVideo", requireAuth, attachPremiumStatus, async (req, res) => {
   try {
-    // Repurpose Studio is a Pro feature end to end, and this spends real
-    // AI budget — refuse free accounts outright instead of relying on
-    // the budget gate's error to explain it.
     if (!req.isPremium) {
       return res.status(402).json({error: "Upgrade to Pro to analyze videos"});
     }

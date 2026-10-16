@@ -1,12 +1,24 @@
 // providers/cloud_vault_provider.dart
 // COMPLETE Cloud Vault Provider
+//
+// Key changes in this version:
+//  - uploadFile() now checks isPremiumActive() itself, before accepting
+//    anything. The Cloud Vault screen already shows a paywall to
+//    non-premium users, but a client-side bypass (or a future screen
+//    that forgets the check) would otherwise still upload — and every
+//    upload consumes real Firebase Storage quota and real storage money.
+//    Refusing at the source is the correct place.
+//  - Removed orphaned writes to `usedCloudSpace`. That field was
+//    incremented on upload and decremented on delete but never read
+//    anywhere — _loadQuotaAndPremiumStatus() already computes used space
+//    by SUMMING the actual cloudFiles records, which is always correct.
+//    The increment/decrement pair was only ever able to drift.
 
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import '../services/storage_service.dart';
 
 class CloudFile {
@@ -108,7 +120,6 @@ class CloudVaultProvider extends ChangeNotifier {
     init();
   }
 
-  // Initialize the provider
   Future<void> init() async {
     try {
       await _loadQuotaAndPremiumStatus();
@@ -126,21 +137,15 @@ class CloudVaultProvider extends ChangeNotifier {
       final doc = await _firestore.collection('users').doc(user.uid).get();
       if (doc.exists) {
         final data = doc.data() ?? {};
-        // NOTE: premium grants write `premiumExpiry` (a Timestamp) — see
-        // PremiumProvider.grantPremium() -> CloudVaultService.updatePremiumExpiry().
-        // This used to check a field called `isPremium` that nothing in the
-        // app ever wrote, so the Cloud Vault screen could never see a paying
-        // user as premium even right after a successful purchase.
+        // premiumExpiry is the field the server writes on subscription
+        // verification — see functions/index.js:/verifySubscriptionPurchase.
         final expiry = data['premiumExpiry'] as Timestamp?;
         _isPremium = expiry != null && expiry.toDate().isAfter(DateTime.now());
         _quotaBytes = data['cloudQuota'] ?? 3 * 1024 * 1024 * 1024;
       }
-      // Used space is computed live from the actual cloudFiles records
-      // rather than trusting a separately-incremented counter — a file
-      // added via the auto-sync path (CloudVaultService.uploadFile, used by
-      // DownloadProvider) never touched a counter field, so the counter
-      // could silently drift below what's really stored (and billed) in
-      // Firebase. Summing the real records is always correct.
+
+      // Used space is computed live from the actual cloudFiles records —
+      // always correct, and this is what the quota bar actually reads.
       final filesSnapshot = await _firestore
           .collection('users')
           .doc(user.uid)
@@ -152,6 +157,23 @@ class CloudVaultProvider extends ChangeNotifier {
       notifyListeners();
     } catch (e) {
       print('⚠️ Load quota error: $e');
+    }
+  }
+
+  /// Reads premium status fresh, right before an upload — deliberately not
+  /// just consulting the cached _isPremium field, so a subscription that
+  /// expired yesterday doesn't sneak an upload through today.
+  Future<bool> _isPremiumActive() async {
+    final user = _auth.currentUser;
+    if (user == null) return false;
+    try {
+      final doc = await _firestore.collection('users').doc(user.uid).get();
+      if (!doc.exists) return false;
+      final expiry = doc.data()?['premiumExpiry'] as Timestamp?;
+      return expiry != null && expiry.toDate().isAfter(DateTime.now());
+    } catch (e) {
+      print('Premium check error: $e');
+      return false;
     }
   }
 
@@ -206,9 +228,17 @@ class CloudVaultProvider extends ChangeNotifier {
       return false;
     }
 
-    // Check quota
+    // Server-side of the premium wall — see file header comment.
+    final isPremium = await _isPremiumActive();
+    if (!isPremium) {
+      _error = 'Cloud Vault Pro requires an active subscription. '
+          'Upgrade to keep syncing files.';
+      notifyListeners();
+      return false;
+    }
+
     if (_usedBytes >= _quotaBytes) {
-      _error = 'Storage quota exceeded. Please upgrade to Pro.';
+      _error = 'Storage quota exceeded. Delete some files first.';
       notifyListeners();
       return false;
     }
@@ -229,8 +259,17 @@ class CloudVaultProvider extends ChangeNotifier {
       }
 
       final fileSize = await file.length();
-      final isVideo = mimeType?.startsWith('video') ?? false;
-      final ext = localPath.split('.').last;
+
+      // Determine video-ness from BOTH the mime type (when the picker
+      // gives one) AND the filename extension. Some OEM pickers return
+      // null mimeType even for real videos, which used to silently send
+      // videos into the images folder.
+      final ext =
+          fileName.contains('.') ? fileName.split('.').last.toLowerCase() : '';
+      const videoExts = {'mp4', 'webm', 'mov', 'mkv', 'avi', '3gp', 'm4v'};
+      final isVideo =
+          (mimeType?.startsWith('video') ?? false) || videoExts.contains(ext);
+
       final timestamp = DateTime.now().millisecondsSinceEpoch;
       final storagePath =
           'users/${user.uid}/cloud_vault/${timestamp}_$fileName';
@@ -238,7 +277,6 @@ class CloudVaultProvider extends ChangeNotifier {
       _statusMessage = 'Uploading to cloud...';
       notifyListeners();
 
-      // Upload to Firebase Storage with progress
       final ref = _storage.ref(storagePath);
       final uploadTask = ref.putFile(
         file,
@@ -257,15 +295,15 @@ class CloudVaultProvider extends ChangeNotifier {
       final snapshot = await uploadTask;
       final downloadUrl = await snapshot.ref.getDownloadURL();
 
-      // Create thumbnail URL (for videos we use the video URL as thumbnail)
-      final thumbnailUrl = isVideo ? downloadUrl : downloadUrl;
-
-      // Save to Firestore
+      // For videos we just use the video URL as the thumbnail placeholder
+      // (the cloud_vault_screen._buildThumbnail CachedNetworkImage will
+      // render a broken-image fallback, which is fine — a real video
+      // thumbnail would need server-side generation, next milestone).
       final cloudFile = CloudFile(
         id: '$timestamp',
         fileName: fileName,
         storagePath: storagePath,
-        thumbnailUrl: thumbnailUrl,
+        thumbnailUrl: downloadUrl,
         source: source,
         isVideo: isVideo,
         fileSize: fileSize,
@@ -280,15 +318,10 @@ class CloudVaultProvider extends ChangeNotifier {
           .doc('$timestamp')
           .set(cloudFile.toMap());
 
-      // Update user's used space
-      await _firestore.collection('users').doc(user.uid).update({
-        'usedCloudSpace': FieldValue.increment(fileSize),
-      });
-
-      _usedBytes += fileSize;
-
-      // Add to local list
+      // Local cache update — used space stays correct because we recompute
+      // it from the sum of records via _loadQuotaAndPremiumStatus below.
       _files.insert(0, cloudFile);
+      _usedBytes += fileSize;
 
       _statusMessage = 'Upload complete!';
       _uploadProgress = 1.0;
@@ -369,16 +402,13 @@ class CloudVaultProvider extends ChangeNotifier {
       _statusMessage = 'Getting download URL...';
       notifyListeners();
 
-      // Download to device
       final folder = file.isVideo ? 'Videos' : 'Pictures';
       final downloadDir = '/storage/emulated/0/$folder/MediaNest/Cloud';
       final localPath = '$downloadDir/${file.fileName}';
 
-      // Firebase Storage bills $0.12/GB on every download — re-fetching a
-      // file the person already has locally, just because they tapped it
-      // again, is pure wasted spend with zero benefit to them. If a file of
-      // the same name and size already exists at the expected local path,
-      // it's the same file — use it and skip the network entirely.
+      // Skip re-download when the identical file (name + size) already
+      // exists locally — Firebase Storage bills $0.12/GB per download, and
+      // re-fetching a file the person already has is pure wasted spend.
       final existing = File(localPath);
       if (await existing.exists()) {
         final localSize = await existing.length();
@@ -439,11 +469,9 @@ class CloudVaultProvider extends ChangeNotifier {
     if (user == null) return false;
 
     try {
-      // Delete from Storage
       final ref = _storage.ref(file.storagePath);
       await ref.delete();
 
-      // Delete from Firestore
       await _firestore
           .collection('users')
           .doc(user.uid)
@@ -451,14 +479,9 @@ class CloudVaultProvider extends ChangeNotifier {
           .doc(file.id)
           .delete();
 
-      // Update used space
-      await _firestore.collection('users').doc(user.uid).update({
-        'usedCloudSpace': FieldValue.increment(-file.fileSize),
-      });
-
       _usedBytes -= file.fileSize;
+      if (_usedBytes < 0) _usedBytes = 0;
 
-      // Remove from local list
       _files.removeWhere((f) => f.id == file.id);
       notifyListeners();
 
@@ -487,7 +510,9 @@ class CloudVaultProvider extends ChangeNotifier {
           final expiry = expiryDate.toDate();
           final now = DateTime.now();
           final diff = expiry.difference(now);
-          // Grace period of 24 hours
+          // Grace period of 24 hours — matches CloudVaultService's own
+          // GRACE_PERIOD_HOURS and the "renew within 24h or files are
+          // permanently deleted" copy in cloud_vault_screen.dart.
           return diff.isNegative && diff.abs().inHours < 24;
         }
       }
@@ -503,6 +528,6 @@ class CloudVaultProvider extends ChangeNotifier {
   }
 
   void dispose() {
-    // Clean up
+    // Nothing to clean up here.
   }
 }

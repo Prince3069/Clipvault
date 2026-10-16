@@ -15,7 +15,6 @@ class AIService {
   factory AIService() => _instance;
   AIService._internal();
 
-  // Use your deployed Cloud Functions URL
   final String _baseUrl =
       'https://us-central1-social-downloader-2d02b.cloudfunctions.net/apiV1';
 
@@ -23,7 +22,6 @@ class AIService {
   // FEATURE 1: SMART AUTO-ORGANIZATION
   // ──────────────────────────────────────────────────────────────────────────
 
-  /// Analyze a video and get smart tags for auto-organization
   Future<Map<String, dynamic>> analyzeVideo({
     required String title,
     String? description,
@@ -50,7 +48,6 @@ class AIService {
       );
 
       if (response.statusCode == 402) {
-        // Insufficient credits - return fallback with error
         final data = jsonDecode(response.body);
         return {
           'success': false,
@@ -81,7 +78,6 @@ class AIService {
     }
   }
 
-  /// Get all analyzed videos for the current user
   Future<List<Map<String, dynamic>>> getAnalyzedVideos({int limit = 50}) async {
     try {
       final token = await _getIdToken();
@@ -105,12 +101,6 @@ class AIService {
     }
   }
 
-  /// Checks — WITHOUT spending anything — whether the branding/overlay
-  /// feature (Quick Edit's replacement) can be used right now. Call this
-  /// before letting the user start compositing, so the paywall/limit
-  /// message shows up front rather than after they've already picked a
-  /// photo and set a price. See consumeBrandingUse() for the matching
-  /// call to make AFTER a successful local save.
   Future<Map<String, dynamic>> checkBrandingAllowance() async {
     final token = await _getIdToken();
     final response = await http.get(
@@ -123,16 +113,6 @@ class AIService {
     return jsonDecode(response.body);
   }
 
-  /// Records one branding/overlay use. Call this ONLY after the local
-  /// Canvas compositing + file save has actually succeeded — the server
-  /// re-checks the allowance itself rather than trusting the client, and
-  /// a failed local save must never cost the person their monthly
-  /// allowance, same discipline as translateText's own
-  /// check-then-consume-after-success shape.
-  ///
-  /// Throws on a 429 (allowance exhausted) with the server's real message
-  /// — the caller should catch this and show it, same pattern as
-  /// translation_service.dart does for translateText's own errors.
   Future<Map<String, dynamic>> consumeBrandingUse() async {
     final token = await _getIdToken();
     final response = await http.post(
@@ -147,10 +127,6 @@ class AIService {
     return body;
   }
 
-  /// Fetches today's real AI Content Coach challenge — generated fresh
-  /// server-side from the person's actual niche and streak, cached per
-  /// calendar day so calling this more than once today just returns the
-  /// same challenge rather than generating (and charging for) a new one.
   Future<Map<String, dynamic>?> getDailyChallenge() async {
     try {
       final token = await _getIdToken();
@@ -169,14 +145,6 @@ class AIService {
     }
   }
 
-  /// Attempts to mark today's challenge complete. For a verifiable
-  /// challenge, the SERVER checks whether the matching feature was
-  /// actually used today before accepting this — a tap here is no
-  /// longer what marks it done, the server's own check is. Returns
-  /// {success: true, newStreak} on real completion, or
-  /// {success: false, error: '...'} with the server's explanation
-  /// (most commonly: go actually use the feature first) if verification
-  /// fails.
   Future<Map<String, dynamic>> completeDailyChallenge() async {
     try {
       final token = await _getIdToken();
@@ -201,12 +169,6 @@ class AIService {
     }
   }
 
-  /// Reads the Coach profile (streak, points, niche, goal, name) from the
-  /// server. Cheap, free, and safe to call on every Coach screen open —
-  /// this is what keeps the streak counter on the Coach screen in step
-  /// with what the server actually recorded, instead of the old
-  /// SharedPreferences counter that drifted out of sync every time a
-  /// challenge was completed on a different device.
   Future<Map<String, dynamic>> getCoachProfile() async {
     try {
       final token = await _getIdToken();
@@ -237,10 +199,6 @@ class AIService {
     }
   }
 
-  /// Writes the Coach profile (niche, goal, name) to Firestore, so
-  /// /getDailyChallenge can generate challenges that actually match the
-  /// person's niche. Local SharedPreferences is still written by the
-  /// caller for offline display — this is the copy the server reads.
   Future<bool> saveCoachProfile({
     required String niche,
     required String goal,
@@ -264,36 +222,44 @@ class AIService {
   }
 
   /// Largest video the backend will analyze — keep in step with
-  /// MAX_VIDEO_BYTES in functions/lib/videoAnalysis.js and the size cap in
-  /// storage.rules (all three are 24MB).
+  /// MAX_VIDEO_BYTES in functions/lib/videoAnalysis.js (24MB).
   static const int _maxAnalysisBytes = 24 * 1024 * 1024;
 
-  /// Lets the AI see what is actually IN a video, so Repurpose output is
-  /// about the video instead of invented from its title. Uploads the video
-  /// already on the phone to a private temporary path (the server reads it
-  /// and deletes it), then asks the server to analyze it.
+  /// Uploads a video the app already has on the phone to a private temp
+  /// path, asks the server to transcribe and summarize it, and returns
+  /// the analysisKey. Null means "analysis isn't possible" (file missing,
+  /// too large, offline, not Pro, budget used) — never an error the
+  /// caller has to handle; just a signal to fall back to title-only.
   ///
-  /// Returns the analysis key to pass to [processAction], or null if
-  /// analysis isn't possible (file missing/too large, offline, not Pro,
-  /// budget used up, unsupported format). Null is never an error — the
-  /// caller just continues with title-only, the way Repurpose always has.
+  /// Existing callers that only care about the key should keep using this
+  /// method. Callers that need the transcript or summary should use
+  /// [analyzeVideoFileFull] below.
   Future<String?> analyzeVideoFile(String localPath) async {
+    final result = await analyzeVideoFileFull(localPath);
+    return result?['analysisKey'] as String?;
+  }
+
+  /// Same as [analyzeVideoFile], but returns the full analysis payload:
+  /// {analysisKey, summary, keyPhrases, transcript, durationMinutes}.
+  /// Used by Smart Translator's Video tab, which needs the raw transcript
+  /// for translation — a summary would lose the exact words.
+  Future<Map<String, dynamic>?> analyzeVideoFileFull(String localPath) async {
     try {
       final file = File(localPath);
       if (!await file.exists()) {
-        debugPrint('analyzeVideoFile: file not found at $localPath');
+        debugPrint('analyzeVideoFileFull: file not found at $localPath');
         return null;
       }
       final size = await file.length();
       if (size == 0 || size > _maxAnalysisBytes) {
         debugPrint(
-            'analyzeVideoFile: size $size outside bounds (max $_maxAnalysisBytes)');
+            'analyzeVideoFileFull: size $size outside bounds (max $_maxAnalysisBytes)');
         return null;
       }
 
       final uid = FirebaseAuth.instance.currentUser?.uid;
       if (uid == null) {
-        debugPrint('analyzeVideoFile: no signed-in user');
+        debugPrint('analyzeVideoFileFull: no signed-in user');
         return null;
       }
 
@@ -314,20 +280,19 @@ class AIService {
       );
       if (response.statusCode != 200) {
         debugPrint(
-            'analyzeVideo failed (${response.statusCode}): ${response.body}');
+            'analyzeVideoFileFull failed (${response.statusCode}): ${response.body}');
         return null;
       }
       final data = jsonDecode(response.body) as Map<String, dynamic>;
-      final key = data['analysisKey'] as String?;
-      debugPrint('analyzeVideoFile: success, key=$key');
-      return key;
+      debugPrint('analyzeVideoFileFull: success, key=${data['analysisKey']}, '
+          'transcriptLength=${(data['transcript'] as String?)?.length ?? 0}');
+      return data;
     } catch (e) {
-      debugPrint('analyzeVideoFile error: $e');
+      debugPrint('analyzeVideoFileFull error: $e');
       return null;
     }
   }
 
-  /// Get library statistics (categories, moods, platforms, top keywords)
   Future<Map<String, dynamic>> getLibraryStats() async {
     try {
       final token = await _getIdToken();
@@ -357,7 +322,6 @@ class AIService {
     }
   }
 
-  /// Get AI-suggested collections based on your library
   Future<List<Map<String, dynamic>>> getCollectionSuggestions() async {
     try {
       final token = await _getIdToken();
@@ -385,17 +349,12 @@ class AIService {
   // FEATURE 2: REPURPOSE STUDIO
   // ──────────────────────────────────────────────────────────────────────────
 
-  /// Process a repurpose action (caption, hashtags, subtitle, etc.)
   Future<Map<String, dynamic>> processAction({
     required String actionId,
     String? videoId,
     String? videoTitle,
     String? videoPath,
     String? platform,
-    // Key of an already-completed analyzeVideoFile() result for this video.
-    // The backend looks up the stored transcript summary by it and feeds
-    // the REAL content into the prompt (see functions/lib/repurpose.js).
-    // Optional on purpose: null means title-only, exactly as before.
     String? analysisKey,
   }) async {
     try {
@@ -450,7 +409,6 @@ class AIService {
     }
   }
 
-  /// Generate captions for a video
   Future<Map<String, dynamic>> generateCaptions({
     required String title,
     String? platform,
@@ -462,7 +420,6 @@ class AIService {
     );
   }
 
-  /// Generate hashtags for a video
   Future<Map<String, dynamic>> generateHashtags({
     required String title,
     String? platform,
@@ -474,7 +431,6 @@ class AIService {
     );
   }
 
-  /// Generate subtitles for a video
   Future<Map<String, dynamic>> generateSubtitles({
     required String videoPath,
     String? videoTitle,
@@ -486,7 +442,6 @@ class AIService {
     );
   }
 
-  /// Translate content
   Future<Map<String, dynamic>> translateContent({
     required String videoTitle,
   }) async {
@@ -496,7 +451,6 @@ class AIService {
     );
   }
 
-  /// Summarize content
   Future<Map<String, dynamic>> summarizeContent({
     required String videoTitle,
   }) async {
@@ -510,16 +464,14 @@ class AIService {
   // PREMIUM & CREDITS
   // ──────────────────────────────────────────────────────────────────────────
 
-  /// Get user's AI credits.
-  ///
   /// The error fallback deliberately returns remainingCredits: null — NOT 0.
   /// The old fallback returned {'credits': 0, 'isPremium': false}, which no
   /// caller ever actually read (there is no 'credits' key in the real
-  /// /getAICredits response shape), and every caller that did `credits[
-  /// 'remainingCredits'] as int? ?? 0` silently turned a failed request into
-  /// "0 credits" — which the Repurpose Studio UI then displayed as if the
-  /// person genuinely had none, even when they were Pro. null means
-  /// "unknown", and the UI can hide the badge instead of lying with "0".
+  /// /getAICredits response shape), and every caller that did
+  /// `credits['remainingCredits'] as int? ?? 0` silently turned a failed
+  /// request into "0 credits" — which the Repurpose Studio UI then
+  /// displayed as if the person genuinely had none, even when they were
+  /// Pro. null means "unknown", and the UI can hide the badge instead.
   Future<Map<String, dynamic>> getAICredits() async {
     try {
       final token = await _getIdToken();
@@ -542,7 +494,6 @@ class AIService {
     }
   }
 
-  /// Verify premium status
   Future<Map<String, dynamic>> verifyPremium() async {
     try {
       final token = await _getIdToken();
@@ -569,7 +520,6 @@ class AIService {
   // TRANSLATION
   // ──────────────────────────────────────────────────────────────────────────
 
-  /// Translate text to target language
   Future<String> translateText({
     required String text,
     required String targetLanguage,
@@ -634,7 +584,6 @@ class AIService {
     }
   }
 
-  /// Detect language of text
   Future<String> detectLanguage(String text) async {
     try {
       final token = await _getIdToken();
@@ -664,7 +613,6 @@ class AIService {
   // DOWNLOADS
   // ──────────────────────────────────────────────────────────────────────────
 
-  /// Log a download
   Future<void> logDownload({
     required String platform,
     String? url,
@@ -694,7 +642,6 @@ class AIService {
     }
   }
 
-  /// Get download stats
   Future<Map<String, dynamic>> getDownloadStats() async {
     try {
       final token = await _getIdToken();
@@ -721,7 +668,6 @@ class AIService {
   // CLOUD VAULT
   // ──────────────────────────────────────────────────────────────────────────
 
-  /// Get cloud vault files
   Future<List<Map<String, dynamic>>> getCloudVaultFiles() async {
     try {
       final token = await _getIdToken();
@@ -745,7 +691,6 @@ class AIService {
     }
   }
 
-  /// Delete a cloud vault file
   Future<bool> deleteCloudFile(String fileId) async {
     try {
       final token = await _getIdToken();
@@ -775,7 +720,6 @@ class AIService {
   // ANALYTICS
   // ──────────────────────────────────────────────────────────────────────────
 
-  /// Track an analytics event
   Future<void> trackEvent(String event,
       {Map<String, dynamic>? properties}) async {
     try {
@@ -821,11 +765,6 @@ class AIService {
     };
   }
 
-  // ──────────────────────────────────────────────────────────────────────────
-  // HEALTH CHECK
-  // ──────────────────────────────────────────────────────────────────────────
-
-  /// Check if the AI service is healthy
   Future<Map<String, dynamic>> healthCheck() async {
     try {
       final response = await http.get(
