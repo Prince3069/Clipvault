@@ -12,12 +12,17 @@ class PurchaseService {
   static const String kAnnualId = 'saveit_premium_annual';
 
   // Consumable credit packs — IDs must match functions/lib/budget.js's
-  // CREDIT_PACKS exactly, and must be created in Play Console as
-  // "In-app products" (consumable), NOT subscriptions.
-  static const String kCredits099Id = 'MediaNest_credits_099';
-  static const String kCredits299Id = 'MediaNest_credits_299';
-  static const String kCredits699Id = 'MediaNest_credits_699';
-  static const String kCredits1499Id = 'MediaNest_credits_1499';
+  // CREDIT_PACKS exactly, and the products that ACTUALLY exist in Play
+  // Console (verified against the Console screenshot: all four live as
+  // "clipvault_credits_*"). The previous values here were "MediaNest_
+  // credits_*" — a rename that was never propagated to the Play Console
+  // products themselves — so every real purchase of these products was
+  // rejected by /redeemCreditPurchase with "Unknown credit pack productId".
+  // Nobody had ever successfully purchased credits.
+  static const String kCredits099Id = 'clipvault_credits_099';
+  static const String kCredits299Id = 'clipvault_credits_299';
+  static const String kCredits699Id = 'clipvault_credits_699';
+  static const String kCredits1499Id = 'clipvault_credits_1499';
   static const Set<String> creditPackIds = {
     kCredits099Id,
     kCredits299Id,
@@ -126,9 +131,8 @@ class PurchaseService {
     if (!_available) throw 'Google Play Billing not available';
     if (!_loaded) await _loadProducts();
 
-    final String productId = plan == PurchasePlan.monthly
-        ? kMonthlyId
-        : kAnnualId;
+    final String productId =
+        plan == PurchasePlan.monthly ? kMonthlyId : kAnnualId;
 
     final product = _find(productId);
     if (product == null)

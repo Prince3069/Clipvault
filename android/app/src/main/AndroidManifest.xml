@@ -8,6 +8,16 @@
         android:maxSdkVersion="29" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="29" />
+    <!-- Android 13+ media read permissions — required by image_picker on
+         OEM Android builds (Xiaomi/Realme/Tecno/Infinix/Samsung One UI etc.)
+         where the system Photo Picker falls back to ACTION_GET_CONTENT and
+         silently returns null when these aren't granted. Without these the
+         Cloud Vault "Choose video" / "Take a photo" options never open the
+         picker — the exact reported bug. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <!-- Android 14+ partial-access variant; harmless on older versions. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
     <!-- Requested only when the user enables download-completion notifications. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
