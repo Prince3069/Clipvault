@@ -110,10 +110,14 @@ const MONTHLY_EQUIVALENT_PRICE_USD = {
 };
 
 // One-off credit top-up packs — real Google Play consumable product IDs.
-// Create these in Play Console → Monetize → Products → In-app products
-// (consumables, NOT subscriptions) with IDs matching exactly. Price is the
-// real charge to the user; budgetUsd (30% of price) is what actually gets
-// added to their balance.
+// These EXACTLY match the product IDs that exist in Play Console
+// (Monetize → Products → One-time products → clipvault_credits_099/299/
+// 699/1499), and match purchase_service.dart's kCredits099Id..1499Id.
+// The client previously used "MediaNest_credits_*" IDs that were never
+// created in Play Console, so /redeemCreditPurchase rejected every real
+// purchase with "Unknown credit pack productId" — nobody had ever been
+// able to buy credits. Renaming Play Console products is not an option;
+// aligning the client to the existing ones is.
 const CREDIT_PACKS = {
   clipvault_credits_099: {priceUsd: 0.99},
   clipvault_credits_299: {priceUsd: 2.99},
@@ -155,9 +159,31 @@ async function getBudgetState(uid) {
 
   const premiumExpiry = userData.premiumExpiry ? userData.premiumExpiry.toDate() : null;
   const isPremium = !!(premiumExpiry && premiumExpiry.getTime() > Date.now());
-  const planId = userData.planId === "monthly" || userData.planId === "annual"
-    ? userData.planId
-    : null;
+
+  // planId fallback: an OLDER build of the client used to write
+  // premiumExpiry directly to Firestore from its local purchase callback,
+  // without ever writing planId. Those users are genuinely premium (their
+  // money hit Play Console; the server-verified path now writes both
+  // fields on every future renewal), but with no planId this line used to
+  // produce priceUsd = 0 → periodBudgetUsd = 0 → remainingCredits = 0, so
+  // the app showed "Pro" AND "0 AI credits" at the same time — exactly the
+  // reported bug. Defaulting to "monthly" for these users (deliberately
+  // the SMALLER budget of the two plans) un-sticks them without ever
+  // over-allocating to a genuine monthly subscriber, and without ever
+  // over-allocating to a genuine annual subscriber either. Next renewal
+  // through /verifySubscriptionPurchase writes a real planId and this
+  // fallback stops applying.
+  const rawPlanId = userData.planId;
+  const validPlanId = rawPlanId === "monthly" || rawPlanId === "annual";
+  const planId = validPlanId ? rawPlanId : (isPremium ? "monthly" : null);
+  if (isPremium && !validPlanId) {
+    console.warn(
+      `getBudgetState: uid ${uid} is premium with no/invalid planId ` +
+      `(got ${JSON.stringify(rawPlanId)}) — defaulting to monthly budget. ` +
+      `The next /verifySubscriptionPurchase will write a real planId.`
+    );
+  }
+
   const priceUsd = planId ? PLAN_PRICE_USD[planId] : 0;
   // The monthly-equivalent price is what the BUDGET calculation actually
   // needs — priceUsd itself stays the real, full price paid (used for

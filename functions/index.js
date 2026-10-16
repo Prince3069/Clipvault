@@ -513,7 +513,7 @@ app.post("/redeemCreditPurchase", requireAuth, attachPremiumStatus, async (req, 
     }
 
     // Same 30% rule as the subscription itself — what you actually charged
-    // times 0.30 is what gets added to spend on AI, guaranteeing this
+    // times 0.25 is what gets added to spend on AI, guaranteeing this
     // top-up can't be a worse deal for your margin than a subscription.
     const budgetUsdToAdd = pack.priceUsd * TOPUP_BUDGET_FRACTION;
     await addTopUp(req.user.uid, budgetUsdToAdd);
@@ -755,6 +755,62 @@ app.post("/completeDailyChallenge", requireAuth, async (req, res) => {
   } catch (e) {
     console.error("completeDailyChallenge error:", e);
     res.status(502).json({error: "Could not complete challenge"});
+  }
+});
+
+// ─── AI Content Coach — profile (streak, points, niche, goal) ───────────
+// The client needs a single, cheap read to render its dashboard header
+// without firing the paid /getDailyChallenge call twice. Streak and points
+// live in Firestore (written by /completeDailyChallenge) — this just reads
+// them back. Also returns niche/goal/name so the coach screen can display
+// them after a reinstall, without depending on device-only SharedPreferences.
+app.get("/getCoachProfile", requireAuth, async (req, res) => {
+  try {
+    const doc = await db.collection("users").doc(req.user.uid).get();
+    const data = doc.data() || {};
+    res.json({
+      streak: data.coachStreak || 0,
+      points: data.coachPoints || 0,
+      niche: data.coachNiche || null,
+      goal: data.coachGoal || null,
+      name: data.coachName || null,
+    });
+  } catch (e) {
+    console.error("getCoachProfile error:", e);
+    res.status(500).json({error: "Could not load coach profile"});
+  }
+});
+
+// ─── AI Content Coach — save niche/goal/name ─────────────────────────────
+// Writes the person's profile fields to Firestore so the server-side
+// challenge generator (getDailyChallenge) can read a real niche instead of
+// falling back to "general content creation". Validation is deliberately
+// loose but bounded — this is user-authored free text that goes into an
+// LLM prompt, so cap the length and strip control chars.
+app.post("/saveCoachProfile", requireAuth, async (req, res) => {
+  try {
+    const {niche, goal, name} = req.body || {};
+    const update = {};
+    const clean = (v, max) =>
+      typeof v === "string" ? v.replace(/[\x00-\x1F\x7F]/g, "").trim().slice(0, max) : null;
+
+    const cleanNiche = clean(niche, 60);
+    const cleanGoal = clean(goal, 60);
+    const cleanName = clean(name, 40);
+
+    if (cleanNiche) update.coachNiche = cleanNiche;
+    if (cleanGoal) update.coachGoal = cleanGoal;
+    if (cleanName) update.coachName = cleanName;
+
+    if (Object.keys(update).length === 0) {
+      return res.status(400).json({error: "Nothing valid to save"});
+    }
+
+    await db.collection("users").doc(req.user.uid).set(update, {merge: true});
+    res.json({success: true});
+  } catch (e) {
+    console.error("saveCoachProfile error:", e);
+    res.status(500).json({error: "Could not save coach profile"});
   }
 });
 
