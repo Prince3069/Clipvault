@@ -1,8 +1,16 @@
 // ui/screens/ai_content_coach.dart
 // COMPLETE - AI Content Coach (Beta)
 // Features: Content Analysis, Strategy Suggestions, Daily Challenges, Progress Tracking
+//
+// REWIRED: daily challenges, streak and points now all come from the real
+// server endpoints in functions/index.js (/getDailyChallenge,
+// /completeDailyChallenge, /getCoachProfile, /saveCoachProfile). The old
+// version of this screen shipped a hardcoded pool of five challenges and
+// a SharedPreferences counter that never agreed with what the server
+// actually recorded. That disconnect is gone — this screen is a thin
+// client over the server-side system that was already built and running
+// idle.
 
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -139,7 +147,6 @@ class _AIContentCoachState extends State<AIContentCoach>
   List<CoachChallenge> _completedChallenges = [];
   Map<String, dynamic> _analysis = {};
   List<Map<String, dynamic>> _contentIdeas = [];
-  List<Map<String, dynamic>> _learningPath = [];
   int _streak = 0;
   int _points = 0;
 
@@ -172,13 +179,13 @@ class _AIContentCoachState extends State<AIContentCoach>
   // ─── Data Loading ────────────────────────────────────────────────────
 
   Future<void> _loadUserData() async {
-    setState(() => _isLoading = true);
+    if (mounted) setState(() => _isLoading = true);
 
     try {
       final prefs = await SharedPreferences.getInstance();
       _userName = prefs.getString('coach_user_name') ?? 'Creator';
 
-      // Load preferences
+      // Load local preferences (offline fallback / first-paint display)
       final goalStr = prefs.getString('coach_goal');
       final nicheStr = prefs.getString('coach_niche');
       _experienceLevel = prefs.getString('coach_experience') ?? 'beginner';
@@ -197,162 +204,101 @@ class _AIContentCoachState extends State<AIContentCoach>
         );
       }
 
-      // Check if onboarding is complete
       _isOnboarding = !(prefs.getBool('coach_onboarding_complete') ?? false);
-
-      // Load challenges
-      await _loadChallenges();
-
-      // Load analysis
-      await _analyzeContent();
-
-      // Generate content ideas
-      await _generateContentIdeas();
-
-      // Load streak
-      _streak = prefs.getInt('coach_streak') ?? 0;
-      _points = prefs.getInt('coach_points') ?? 0;
-
-      // Update daily streak
-      final lastActive = prefs.getString('coach_last_active');
-      final today = DateTime.now().toIso8601String().split('T')[0];
-      if (lastActive != today) {
-        final yesterday = DateTime.now()
-            .subtract(const Duration(days: 1))
-            .toIso8601String()
-            .split('T')[0];
-        if (lastActive == yesterday) {
-          _streak++;
-        } else {
-          _streak = 1;
-        }
-        await prefs.setString('coach_last_active', today);
-        await prefs.setInt('coach_streak', _streak);
+      if (_isOnboarding) {
+        if (mounted) setState(() => _isLoading = false);
+        return;
       }
+
+      // ─── Authoritative streak + points + niche from the server ─────
+      // The old client kept these in SharedPreferences, which never agreed
+      // with Firestore's coachStreak/coachPoints that the real
+      // /completeDailyChallenge writes. Reading the server's copy is the
+      // single source of truth now.
+      final profile = await _ai.getCoachProfile();
+      _streak = (profile['streak'] as num?)?.toInt() ?? 0;
+      _points = (profile['points'] as num?)?.toInt() ?? 0;
+
+      // If the server has a niche that differs from local prefs (e.g. the
+      // person edited it on another device), prefer the server's.
+      final serverNiche = profile['niche'] as String?;
+      if (serverNiche != null && serverNiche.isNotEmpty) {
+        final match = CoachNiche.values.firstWhere(
+          (n) => n.label.toLowerCase() == serverNiche.toLowerCase(),
+          orElse: () => _selectedNiche,
+        );
+        _selectedNiche = match;
+      }
+
+      final serverName = profile['name'] as String?;
+      if (serverName != null && serverName.isNotEmpty) {
+        _userName = serverName;
+      }
+
+      // ─── Today's real challenge, generated server-side ─────────────
+      final challengeData = await _ai.getDailyChallenge();
+      if (challengeData != null) {
+        final c = _challengeFromServer(challengeData);
+        if (c.isCompleted) {
+          _dailyChallenges = [];
+          _completedChallenges = [c];
+        } else {
+          _dailyChallenges = [c];
+          _completedChallenges = [];
+        }
+      } else {
+        _dailyChallenges = [];
+        _completedChallenges = [];
+      }
+
+      // Content analysis + ideas stay local (they don't touch the server)
+      await _analyzeContent();
+      await _generateContentIdeas();
     } catch (e) {
-      setState(() => _error = 'Failed to load coach data: $e');
+      if (mounted) setState(() => _error = 'Failed to load coach data: $e');
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
   }
 
-  Future<void> _loadChallenges() async {
-    final prefs = await SharedPreferences.getInstance();
-    final challengesJson = prefs.getString('coach_challenges');
-    final completedJson = prefs.getString('coach_completed_challenges');
+  /// Converts the raw server challenge JSON into a CoachChallenge the UI
+  /// already knows how to render. Server sends difficulty as "easy" /
+  /// "medium" / "hard" — mapped here to the 1-5 integer scale the card
+  /// widget uses, and to a rough minutes estimate.
+  CoachChallenge _challengeFromServer(Map<String, dynamic> data) {
+    final difficulty = (data['difficulty'] as String? ?? 'easy').toLowerCase();
+    final int diffInt =
+        difficulty == 'hard' ? 5 : (difficulty == 'medium' ? 3 : 1);
+    final int estMinutes =
+        difficulty == 'hard' ? 30 : (difficulty == 'medium' ? 15 : 5);
+    final verifyFeature = data['verifyFeature'] as String?;
+    final completed = data['completed'] == true;
+    final dateId = data['date'] as String? ??
+        DateTime.now().toIso8601String().split('T')[0];
 
-    if (challengesJson != null) {
-      final List<dynamic> data = jsonDecode(challengesJson);
-      _dailyChallenges = data.map((e) => CoachChallenge.fromJson(e)).toList();
-    } else {
-      // Generate default challenges
-      _dailyChallenges = _generateDefaultChallenges();
-      await _saveChallenges();
-    }
-
-    if (completedJson != null) {
-      final List<dynamic> data = jsonDecode(completedJson);
-      _completedChallenges =
-          data.map((e) => CoachChallenge.fromJson(e)).toList();
-    }
-  }
-
-  Future<void> _saveChallenges() async {
-    final prefs = await SharedPreferences.getInstance();
-    final json = jsonEncode(_dailyChallenges.map((c) => c.toJson()).toList());
-    await prefs.setString('coach_challenges', json);
-    final completedJson =
-        jsonEncode(_completedChallenges.map((c) => c.toJson()).toList());
-    await prefs.setString('coach_completed_challenges', completedJson);
-  }
-
-  List<CoachChallenge> _generateDefaultChallenges() {
-    return [
-      const CoachChallenge(
-        id: 'challenge_1',
-        title: 'Create a 15-Second Hook',
-        description: 'Capture attention in the first 3 seconds',
-        category: 'Content Creation',
-        difficulty: 2,
-        estimatedMinutes: 10,
-        steps: [
-          'Open your camera app',
-          'Record a 15-second video with a strong opening',
-          'Watch it back and critique the hook',
-          'Record 2 more versions with different approaches',
-          'Pick the best one',
-        ],
-        tip: 'The first 3 seconds determine if someone watches the rest.',
-      ),
-      const CoachChallenge(
-        id: 'challenge_2',
-        title: 'Analyze a Top Creator',
-        description: 'Study what makes their content work',
-        category: 'Strategy',
-        difficulty: 1,
-        estimatedMinutes: 15,
-        steps: [
-          'Find a creator in your niche with 100K+ followers',
-          'Watch 5 of their most popular videos',
-          'Note: Hook, Visuals, Audio, Call-to-Action',
-          'Write down 3 things you can learn from them',
-        ],
-        tip: 'Don\'t copy - learn what works and make it your own.',
-      ),
-      const CoachChallenge(
-        id: 'challenge_3',
-        title: 'Write 10 Caption Ideas',
-        description: 'Generate a week\'s worth of captions',
-        category: 'Copywriting',
-        difficulty: 2,
-        estimatedMinutes: 20,
-        steps: [
-          'Brainstorm 3 topics from your niche',
-          'Write 3-4 captions per topic',
-          'Include different tones: Educational, Funny, Inspirational',
-          'Add 3 relevant hashtags to each',
-          'Save the best 5 for future use',
-        ],
-        tip: 'Captions that ask questions get more comments.',
-      ),
-      const CoachChallenge(
-        id: 'challenge_4',
-        title: 'Create a Content Pillar',
-        description: 'Define your content pillars',
-        category: 'Strategy',
-        difficulty: 3,
-        estimatedMinutes: 25,
-        steps: [
-          'Identify 3-5 topics you can consistently create content about',
-          'For each pillar, list 5 sub-topics',
-          'Create a content calendar for the next 7 days',
-          'Ensure each post fits into one of your pillars',
-        ],
-        tip: 'Content pillars help you stay focused and build authority.',
-      ),
-      const CoachChallenge(
-        id: 'challenge_5',
-        title: 'Repurpose Your Best Content',
-        description: 'Extend the life of your content',
-        category: 'Growth',
-        difficulty: 2,
-        estimatedMinutes: 15,
-        steps: [
-          'Find your best-performing video',
-          'Extract key moments as individual clips',
-          'Create a carousel post from screenshots',
-          'Write a thread on X/Twitter with key insights',
-        ],
-        tip: 'One piece of content can become 5+ posts.',
-      ),
-    ];
+    return CoachChallenge(
+      id: dateId,
+      title: data['title'] as String? ?? "Today's challenge",
+      description: data['description'] as String? ?? '',
+      category: verifyFeature != null
+          ? 'Use ${verifyFeature[0].toUpperCase()}${verifyFeature.substring(1)}'
+          : 'AI Coach',
+      difficulty: diffInt,
+      estimatedMinutes: estMinutes,
+      steps: const [],
+      tip: completed
+          ? 'Completed today — nice work!'
+          : (verifyFeature != null
+              ? 'Verified challenge: use $verifyFeature at least once today to complete it.'
+              : null),
+      isCompleted: completed,
+    );
   }
 
   // ─── AI Analysis ─────────────────────────────────────────────────────
 
   Future<void> _analyzeContent() async {
     try {
-      // Get user's media library
       final mediaProvider = Provider.of<MediaProvider>(context, listen: false);
       final allMedia = mediaProvider.allMedia;
 
@@ -364,10 +310,8 @@ class _AIContentCoachState extends State<AIContentCoach>
         return;
       }
 
-      // Analyze library stats
       final stats = await _ai.getLibraryStats();
 
-      // Generate insights based on stats
       final categories = stats['categories'] as Map<String, dynamic>? ?? {};
       final topCategory = categories.entries.isNotEmpty
           ? categories.entries.reduce((a, b) => a.value > b.value ? a : b).key
@@ -405,7 +349,6 @@ class _AIContentCoachState extends State<AIContentCoach>
       String topCategory, String topPlatform) {
     final recommendations = <String>[];
 
-    // Based on category
     switch (topCategory) {
       case 'Comedy':
         recommendations.add(
@@ -430,7 +373,6 @@ class _AIContentCoachState extends State<AIContentCoach>
         recommendations.add('🎯 Double down on what\'s working');
     }
 
-    // Based on platform
     if (topPlatform == 'tiktok') {
       recommendations.add('🎵 Use trending sounds to increase discoverability');
       recommendations
@@ -449,11 +391,9 @@ class _AIContentCoachState extends State<AIContentCoach>
   // ─── Content Ideas ──────────────────────────────────────────────────
 
   Future<void> _generateContentIdeas() async {
-    setState(() => _isProcessing = true);
+    if (mounted) setState(() => _isProcessing = true);
 
     try {
-      // Provide an offline starter set while the dedicated Repurpose Studio
-      // handles provider-backed AI actions with explicit allowance tracking.
       _contentIdeas = [
         {
           'title': 'Behind the Scenes',
@@ -531,43 +471,73 @@ class _AIContentCoachState extends State<AIContentCoach>
   // ─── User Actions ────────────────────────────────────────────────────
 
   Future<void> _completeChallenge(CoachChallenge challenge) async {
-    setState(() {
-      _completedChallenges.add(challenge);
-      _points += challenge.difficulty * 10;
-      _dailyChallenges.removeWhere((c) => c.id == challenge.id);
-    });
+    if (_isProcessing) return;
+    setState(() => _isProcessing = true);
 
-    await _saveChallenges();
+    try {
+      final result = await _ai.completeDailyChallenge();
+      if (!mounted) return;
 
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setInt('coach_points', _points);
+      if (result['success'] == true) {
+        setState(() {
+          _dailyChallenges.removeWhere((c) => c.id == challenge.id);
+          if (!_completedChallenges.any((c) => c.id == challenge.id)) {
+            _completedChallenges.add(challenge);
+          }
+          _streak = (result['newStreak'] as num?)?.toInt() ?? (_streak + 1);
+          _points += challenge.difficulty * 10;
+          _isProcessing = false;
+        });
 
-    // Show celebration
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Row(
-          children: [
-            const Icon(Icons.celebration_rounded, color: Colors.white),
-            const SizedBox(width: AppSpacing.sm),
-            Expanded(
-              child: Text(
-                '🎉 Challenge complete! +${challenge.difficulty * 10} points',
-                style: const TextStyle(color: Colors.white),
-              ),
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                const Icon(Icons.celebration_rounded, color: Colors.white),
+                const SizedBox(width: AppSpacing.sm),
+                Expanded(
+                  child: Text(
+                    '🎉 Challenge complete! +${challenge.difficulty * 10} points',
+                    style: const TextStyle(color: Colors.white),
+                  ),
+                ),
+              ],
             ),
-          ],
-        ),
-        backgroundColor: AppColors.success,
-        behavior: SnackBarBehavior.floating,
-        duration: const Duration(seconds: 3),
-      ),
-    );
+            backgroundColor: AppColors.success,
+            behavior: SnackBarBehavior.floating,
+            duration: const Duration(seconds: 3),
+          ),
+        );
 
-    // Track completion
-    await _ai.trackEvent('coach_challenge_completed', properties: {
-      'challenge_id': challenge.id,
-      'points_earned': challenge.difficulty * 10,
-    });
+        await _ai.trackEvent('coach_challenge_completed', properties: {
+          'challenge_id': challenge.id,
+          'points_earned': challenge.difficulty * 10,
+        });
+      } else {
+        setState(() => _isProcessing = false);
+        final error =
+            result['error'] as String? ?? 'Could not complete challenge';
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(error),
+            backgroundColor: AppColors.warning,
+            behavior: SnackBarBehavior.floating,
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _isProcessing = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+              'Could not reach the server. Check your connection and try again.'),
+          backgroundColor: AppColors.error,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
   }
 
   Future<void> _saveOnboarding() async {
@@ -578,6 +548,21 @@ class _AIContentCoachState extends State<AIContentCoach>
     await prefs.setString('coach_experience', _experienceLevel);
     await prefs.setStringList('coach_interests', _interests);
     await prefs.setBool('coach_onboarding_complete', true);
+
+    // Sync to Firestore — this is what makes /getDailyChallenge actually
+    // generate challenges for the person's real niche instead of falling
+    // back to "general content creation". Non-fatal: if it fails, the
+    // local prefs still work for display, and the next Coach screen open
+    // will retry.
+    try {
+      await _ai.saveCoachProfile(
+        niche: _selectedNiche.label,
+        goal: _selectedGoal.label,
+        name: _userName,
+      );
+    } catch (e) {
+      debugPrint('Coach profile sync failed (non-fatal): $e');
+    }
 
     setState(() => _isOnboarding = false);
     await _loadUserData();
@@ -611,10 +596,7 @@ class _AIContentCoachState extends State<AIContentCoach>
       appBar: _buildAppBar(),
       body: Column(
         children: [
-          // ─── Tabs ──────────────────────────────────────────────────────────
           _buildTabs(),
-
-          // ─── Content ──────────────────────────────────────────────────────
           Expanded(
             child: IndexedStack(
               index: _selectedTab,
@@ -707,7 +689,6 @@ class _AIContentCoachState extends State<AIContentCoach>
         ],
       ),
       actions: [
-        // Streak
         Container(
           padding: const EdgeInsets.symmetric(
             horizontal: AppSpacing.sm,
@@ -740,7 +721,6 @@ class _AIContentCoachState extends State<AIContentCoach>
             ],
           ),
         ),
-        // Points
         Container(
           padding: const EdgeInsets.symmetric(
             horizontal: AppSpacing.sm,
@@ -851,7 +831,6 @@ class _AIContentCoachState extends State<AIContentCoach>
       padding: const EdgeInsets.all(AppSpacing.md),
       child: Column(
         children: [
-          // ─── Welcome ──────────────────────────────────────────────────────
           Container(
             padding: const EdgeInsets.all(AppSpacing.md),
             decoration: BoxDecoration(
@@ -868,14 +847,15 @@ class _AIContentCoachState extends State<AIContentCoach>
                     color: Colors.white.withValues(alpha: 0.2),
                     borderRadius: BorderRadius.circular(AppRadius.md),
                   ),
-                  child: Text(
-                    _userName[0].toUpperCase(),
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 20,
-                      fontWeight: FontWeight.w700,
+                  child: Center(
+                    child: Text(
+                      _userName.isNotEmpty ? _userName[0].toUpperCase() : 'C',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 20,
+                        fontWeight: FontWeight.w700,
+                      ),
                     ),
-                    textAlign: TextAlign.center,
                   ),
                 ),
                 const SizedBox(width: AppSpacing.md),
@@ -911,7 +891,7 @@ class _AIContentCoachState extends State<AIContentCoach>
                     borderRadius: BorderRadius.circular(AppRadius.sm),
                   ),
                   child: Text(
-                    '${_selectedNiche.label}',
+                    _selectedNiche.label,
                     style: const TextStyle(
                       color: Colors.white,
                       fontSize: 10,
@@ -922,10 +902,7 @@ class _AIContentCoachState extends State<AIContentCoach>
               ],
             ),
           ),
-
           const SizedBox(height: AppSpacing.md),
-
-          // ─── Quick Stats ─────────────────────────────────────────────────
           Row(
             children: [
               _StatCard(
@@ -950,10 +927,7 @@ class _AIContentCoachState extends State<AIContentCoach>
               ),
             ],
           ),
-
           const SizedBox(height: AppSpacing.md),
-
-          // ─── Analysis ────────────────────────────────────────────────────
           if (analysis.isNotEmpty && analysis['status'] == 'ready') ...[
             Container(
               padding: const EdgeInsets.all(AppSpacing.md),
@@ -1033,10 +1007,7 @@ class _AIContentCoachState extends State<AIContentCoach>
               ),
             ),
           ],
-
           const SizedBox(height: AppSpacing.md),
-
-          // ─── Daily Challenge Card ──────────────────────────────────────
           if (_dailyChallenges.isNotEmpty) ...[
             Container(
               padding: const EdgeInsets.all(AppSpacing.md),
@@ -1079,12 +1050,10 @@ class _AIContentCoachState extends State<AIContentCoach>
                     ],
                   ),
                   const SizedBox(height: AppSpacing.sm),
-                  if (_dailyChallenges.isNotEmpty) ...[
-                    _ChallengeCard(
-                      challenge: _dailyChallenges.first,
-                      onComplete: _completeChallenge,
-                    ),
-                  ],
+                  _ChallengeCard(
+                    challenge: _dailyChallenges.first,
+                    onComplete: _completeChallenge,
+                  ),
                 ],
               ),
             ),
@@ -1102,8 +1071,9 @@ class _AIContentCoachState extends State<AIContentCoach>
     if (allChallenges.isEmpty) {
       return _buildEmptyState(
         icon: Icons.task_alt_rounded,
-        title: 'All Challenges Complete! 🎉',
-        description: 'Check back tomorrow for new challenges.',
+        title: 'No Challenge Today',
+        description:
+            'Pull down to refresh, or check back tomorrow for a new one.',
       );
     }
 
@@ -1117,7 +1087,7 @@ class _AIContentCoachState extends State<AIContentCoach>
         return _ChallengeCard(
           challenge: challenge,
           isCompleted: isCompleted,
-          onComplete: isCompleted ? null : _completeChallenge,
+          onComplete: isCompleted || _isProcessing ? null : _completeChallenge,
         );
       },
     );
@@ -1246,8 +1216,6 @@ class _AIContentCoachState extends State<AIContentCoach>
           child: Column(
             children: [
               const Spacer(flex: 1),
-
-              // Header
               Container(
                 width: 72,
                 height: 72,
@@ -1273,10 +1241,7 @@ class _AIContentCoachState extends State<AIContentCoach>
                 style: AppTypography.bodyMedium,
                 textAlign: TextAlign.center,
               ),
-
               const SizedBox(height: AppSpacing.xl),
-
-              // Goal Selection
               const Text(
                 'What do you want to achieve?',
                 style: AppTypography.titleLarge,
@@ -1332,10 +1297,7 @@ class _AIContentCoachState extends State<AIContentCoach>
                   );
                 }).toList(),
               ),
-
               const SizedBox(height: AppSpacing.lg),
-
-              // Niche Selection
               const Text(
                 'What\'s your niche?',
                 style: AppTypography.titleLarge,
@@ -1396,10 +1358,7 @@ class _AIContentCoachState extends State<AIContentCoach>
                   ),
                 ),
               ),
-
               const SizedBox(height: AppSpacing.md),
-
-              // Name
               TextField(
                 decoration: const InputDecoration(
                   hintText: 'What should we call you?',
@@ -1408,10 +1367,7 @@ class _AIContentCoachState extends State<AIContentCoach>
                 onChanged: (value) => setState(
                     () => _userName = value.isNotEmpty ? value : 'Creator'),
               ),
-
               const Spacer(flex: 1),
-
-              // Start button
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(
@@ -1638,8 +1594,8 @@ class _ChallengeCard extends StatelessWidget {
               color: AppColors.textSecondary,
             ),
           ),
-          const SizedBox(height: AppSpacing.sm),
           if (challenge.steps.isNotEmpty) ...[
+            const SizedBox(height: AppSpacing.sm),
             const Text(
               'Steps:',
               style: TextStyle(
