@@ -1,0 +1,132 @@
+rules_version = '2';
+
+// ClipVault Firestore rules.
+//
+// The default "allow read, write: if false" you started with is safe but
+// blocks the app entirely — Cloud Vault reads/writes go directly from the
+// Flutter client to Firestore (not through a server endpoint), so some
+// client access has to be allowed for the app to work at all.
+//
+// Cloud Functions using the Admin SDK (everything in functions/index.js)
+// ALWAYS bypasses these rules regardless of what's written here — rules
+// only ever apply to the client SDK. So these rules only need to correctly
+// gate what the CLIENT can do; the server's own access is never affected
+// by anything below.
+//
+// The one thing these rules exist to guarantee: a client can never write
+// premiumExpiry, planId, coachStreak, or coachPoints on their own user
+// document, no matter what. premiumExpiry/planId are server-only because
+// they're only ever meant to be set after Google Play itself confirms a
+// real purchase (functions/index.js's /verifySubscriptionPurchase).
+// coachStreak/coachPoints are server-only for the same shape of reason:
+// completeDailyChallenge verifies a challenge was genuinely done — by
+// checking real server-recorded events — before incrementing either one;
+// letting the client write these fields directly would let anyone set
+// their own streak to anything, bypassing that verification entirely.
+// coachNiche is deliberately NOT in this list — editing your own niche
+// anytime, with no server gate, is the actual point of that field.
+//
+// Everything else here is scoped to exactly what each screen actually
+// needs — not broad "if signed in, allow everything" access.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    match /users/{uid} {
+      // A user can read their own document (premiumExpiry, coachStreak,
+      // coachPoints included — the app needs to READ these in a few
+      // places; it just can never WRITE any of them directly).
+      allow read: if request.auth != null && request.auth.uid == uid;
+
+      // A user can update their own document EXCEPT the four
+      // server-only fields above — everything else (coachNiche
+      // included) is fine for the client to touch directly.
+      allow update: if request.auth != null && request.auth.uid == uid &&
+        !request.resource.data.diff(resource.data).affectedKeys()
+          .hasAny(['premiumExpiry', 'planId', 'lastVerifiedAt', 'coachStreak', 'coachPoints']);
+
+      // Creating the doc for the first time (e.g. first app launch) is
+      // fine, but a first write still can't set any server-only field
+      // itself — that would be the same bypass through a different door.
+      allow create: if request.auth != null && request.auth.uid == uid &&
+        !('premiumExpiry' in request.resource.data) &&
+        !('planId' in request.resource.data) &&
+        !('coachStreak' in request.resource.data) &&
+        !('coachPoints' in request.resource.data);
+
+      allow delete: if false;
+
+      // Cloud Vault Pro's file records — CloudVaultProvider reads/writes
+      // this directly from the client (list on open, create on upload,
+      // delete on remove). Fully owner-scoped.
+      match /cloudFiles/{fileId} {
+        allow read, write: if request.auth != null && request.auth.uid == uid;
+      }
+
+      // AI Content Coach's daily challenges — written only by
+      // getDailyChallenge/completeDailyChallenge via the Admin SDK. The
+      // client reads today's challenge to display it, but can never set
+      // `completed` itself — that would be the exact same "just tap it
+      // and it records straight up" bug this whole rebuild exists to
+      // close, moved from the app's UI layer into the database layer
+      // instead of actually being fixed.
+      match /coachChallenges/{date} {
+        allow read: if request.auth != null && request.auth.uid == uid;
+        allow write: if false;
+      }
+
+      // Per-day/per-month AI usage counters — written only by
+      // checkAndConsumeCredit/checkAndConsumeMonthlyCredit in
+      // functions/lib/middleware.js via the Admin SDK. The client reads
+      // its own usage through /getAICredits, never directly — no reason
+      // to allow client access here at all.
+      match /aiCredits/{creditDoc} {
+        allow read, write: if false;
+      }
+
+      // The real-dollar AI budget ledger — written only by
+      // functions/lib/budget.js (recordSpend/addTopUp) via the Admin SDK.
+      // Same reasoning: no client access needed or allowed.
+      match /meta/{metaDoc} {
+        allow read, write: if false;
+      }
+
+      // Server-authored analytics/verification events (translate_action_
+      // completed, repurpose_action_completed, etc.) — written only by
+      // the routes that actually perform those actions, via the Admin
+      // SDK. Never client-writable: a client writing its own "I did
+      // this" event here would defeat the entire point of
+      // completeDailyChallenge checking this collection as real
+      // evidence rather than trusting a tap.
+      match /events/{eventId} {
+        allow read: if request.auth != null && request.auth.uid == uid;
+        allow write: if false;
+      }
+
+      // Download history — written only by /logDownload via the Admin
+      // SDK, same reasoning as events above.
+      match /downloadLog/{logId} {
+        allow read: if request.auth != null && request.auth.uid == uid;
+        allow write: if false;
+      }
+    }
+
+    // Purchase-verification records — written only by
+    // functions/index.js's /redeemCreditPurchase and
+    // /verifySubscriptionPurchase via the Admin SDK. These exist purely so
+    // the server can tell "have I already processed this exact purchase
+    // token" — the client never needs to read or write them.
+    match /creditRedemptions/{token} {
+      allow read, write: if false;
+    }
+    match /subscriptionActivations/{token} {
+      allow read, write: if false;
+    }
+
+    // Anything not explicitly matched above stays denied — same posture
+    // as your original default, just with the specific exceptions above.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

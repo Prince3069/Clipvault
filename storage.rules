@@ -1,0 +1,39 @@
+rules_version = '2';
+
+// ClipVault Storage rules.
+//
+// Cloud Vault Pro uploads/downloads go directly from the Flutter client to
+// Storage (CloudVaultProvider.uploadFile/downloadFile), at paths shaped
+// exactly like: users/{uid}/cloud_vault/{timestamp}_{fileName}
+//
+// Everything outside the paths below stays denied, same posture as your
+// original default — this only opens exactly what the app needs.
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    match /users/{uid}/cloud_vault/{allFiles=**} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+    }
+
+    // Temporary hand-off for Repurpose Studio's video analysis. The app
+    // uploads the video it already has on the phone here; the server reads
+    // it with the Admin SDK (which bypasses these rules), transcribes it,
+    // and deletes it. So the client needs CREATE only — never read, never
+    // overwrite, never delete. Size and type are capped here as well as in
+    // the function, so an oversized or non-video upload is refused before
+    // it is ever stored. 24MB matches MAX_VIDEO_BYTES in videoAnalysis.js.
+    match /users/{uid}/analysis_temp/{fileId} {
+      allow create: if request.auth != null
+                    && request.auth.uid == uid
+                    && request.resource.size > 0
+                    && request.resource.size <= 24 * 1024 * 1024
+                    && request.resource.contentType.matches('video/.*');
+      allow read, update, delete: if false;
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -9,38 +9,9 @@ import '../services/download_service.dart';
 import '../services/notification_service.dart';
 import '../services/cloud_vault_service.dart';
 
-extension NotificationServiceProgressExtension on NotificationService {
-  void showDownloadNotification({
-    required int id,
-    required String title,
-    required String body,
-    required bool isComplete,
-  }) {
-    // NotificationService implementation is provided elsewhere in the app.
-    // This compatibility method keeps the download provider compiling when
-    // the underlying service does not expose a native method with this name.
-    print('Notification[$id]: $title - $body');
-  }
-
-  void showDownloadProgressNotification({
-    required int id,
-    required String title,
-    required double progress,
-  }) {
-    final percent = (progress * 100).clamp(0.0, 100.0).toStringAsFixed(0);
-    showDownloadNotification(
-      id: id,
-      title: title,
-      body: '$percent%',
-      isComplete: false,
-    );
-  }
-}
-
 class DownloadProvider extends ChangeNotifier {
   final List<DownloadItem> _downloads = [];
   final DownloadService _downloadService = DownloadService();
-  final NotificationService _notificationService = NotificationService();
   final CloudVaultService _cloudVaultService = CloudVaultService();
 
   List<DownloadItem> get downloads => List.unmodifiable(_downloads);
@@ -73,9 +44,12 @@ class DownloadProvider extends ChangeNotifier {
     notifyListeners();
 
     try {
-      final notifId = int.parse(uniqueId.substring(uniqueId.length - 7));
-      _notificationService.showDownloadProgressNotification(
-          id: notifId, title: 'Downloading...', progress: 0.0);
+      // showDownloadProgress is a STATIC method on NotificationService —
+      // must be called on the class itself, not an instance. The old fake
+      // extension took `progress` as a 0.0–1.0 fraction; the real method
+      // takes a 0–100 int, hence the *100 conversion below.
+      NotificationService.showDownloadProgress(
+          title: 'Downloading...', message: 'Starting…', progress: 0);
 
       final result = await _downloadService.downloadFromUrl(
         url,
@@ -132,13 +106,15 @@ class DownloadProvider extends ChangeNotifier {
         }
       }
 
-      _notificationService.showDownloadNotification(
-        id: notifId,
+      // showDownloadComplete is also static, and doesn't take an id at
+      // all (it always uses notification id 0) — matching the real
+      // method's actual parameters (title/message), not the old fake
+      // extension's made-up ones (id/body/isComplete).
+      NotificationService.showDownloadComplete(
         title: result.status == DownloadStatus.completed
             ? 'Download Complete ✅'
             : 'Download Failed',
-        body: result.fileName,
-        isComplete: result.status == DownloadStatus.completed,
+        message: result.fileName,
       );
     } catch (e) {
       print('Download error: $e');
@@ -162,6 +138,38 @@ class DownloadProvider extends ChangeNotifier {
 
   void removeDownload(String id) {
     _downloads.removeWhere((d) => d.id == id);
+    notifyListeners();
+  }
+
+  /// Registers a download that already completed OUTSIDE the normal
+  /// downloadFromUrl() flow — specifically, BrowserDownloadScreen's
+  /// webview-based fallback (used when direct extraction fails and the
+  /// user downloads via the in-app browser instead). That screen was
+  /// saving files to disk and showing its own "✅ Saved!" toast, but
+  /// never told THIS provider anything happened — so the file genuinely
+  /// saved (it played fine, size shown correctly) while being completely
+  /// invisible to saved_screen.dart, which reads exclusively from this
+  /// provider's `downloads` list to build its platform folders. This is
+  /// the bridge that was missing between "a file got saved somewhere"
+  /// and "the app's own download list knows about it."
+  void registerCompletedDownload({
+    required String url,
+    required String localPath,
+    required String fileName,
+    required String sourceApp,
+  }) {
+    final id = DateTime.now().millisecondsSinceEpoch.toString();
+    _downloads.add(DownloadItem(
+      id: id,
+      url: url,
+      fileName: fileName,
+      thumbnailUrl: '',
+      sourceApp: sourceApp,
+      dateAdded: DateTime.now(),
+      localPath: localPath,
+      status: DownloadStatus.completed,
+      progress: 1.0,
+    ));
     notifyListeners();
   }
 

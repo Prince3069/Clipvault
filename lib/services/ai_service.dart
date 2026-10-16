@@ -3,9 +3,11 @@
 // Handles: AI Tagging, Captions, Hashtags, Subtitles, Translation, Summarization
 
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/foundation.dart';
 
 class AIService {
@@ -103,6 +105,154 @@ class AIService {
     }
   }
 
+  /// Checks — WITHOUT spending anything — whether the branding/overlay
+  /// feature (Quick Edit's replacement) can be used right now. Call this
+  /// before letting the user start compositing, so the paywall/limit
+  /// message shows up front rather than after they've already picked a
+  /// photo and set a price. See consumeBrandingUse() for the matching
+  /// call to make AFTER a successful local save.
+  Future<Map<String, dynamic>> checkBrandingAllowance() async {
+    final token = await _getIdToken();
+    final response = await http.get(
+      Uri.parse('$_baseUrl/checkBrandingAllowance'),
+      headers: {'Authorization': 'Bearer $token'},
+    );
+    if (response.statusCode != 200) {
+      throw Exception('Could not check branding allowance: ${response.body}');
+    }
+    return jsonDecode(response.body);
+  }
+
+  /// Records one branding/overlay use. Call this ONLY after the local
+  /// Canvas compositing + file save has actually succeeded — the server
+  /// re-checks the allowance itself rather than trusting the client, and
+  /// a failed local save must never cost the person their monthly
+  /// allowance, same discipline as translateText's own
+  /// check-then-consume-after-success shape.
+  ///
+  /// Throws on a 429 (allowance exhausted) with the server's real message
+  /// — the caller should catch this and show it, same pattern as
+  /// translation_service.dart does for translateText's own errors.
+  Future<Map<String, dynamic>> consumeBrandingUse() async {
+    final token = await _getIdToken();
+    final response = await http.post(
+      Uri.parse('$_baseUrl/consumeBrandingUse'),
+      headers: {'Authorization': 'Bearer $token'},
+    );
+    final body = jsonDecode(response.body) as Map<String, dynamic>;
+    if (response.statusCode != 200) {
+      throw Exception(
+          body['error']?.toString() ?? 'Could not record branding use');
+    }
+    return body;
+  }
+
+  /// Fetches today's real AI Content Coach challenge — generated fresh
+  /// server-side from the person's actual niche and streak, cached per
+  /// calendar day so calling this more than once today just returns the
+  /// same challenge rather than generating (and charging for) a new one.
+  Future<Map<String, dynamic>?> getDailyChallenge() async {
+    try {
+      final token = await _getIdToken();
+      final response = await http.get(
+        Uri.parse('$_baseUrl/getDailyChallenge'),
+        headers: {'Authorization': 'Bearer $token'},
+      );
+      if (response.statusCode != 200) {
+        debugPrint('getDailyChallenge failed: ${response.body}');
+        return null;
+      }
+      return jsonDecode(response.body) as Map<String, dynamic>;
+    } catch (e) {
+      debugPrint('getDailyChallenge error: $e');
+      return null;
+    }
+  }
+
+  /// Attempts to mark today's challenge complete. For a verifiable
+  /// challenge, the SERVER checks whether the matching feature was
+  /// actually used today before accepting this — a tap here is no
+  /// longer what marks it done, the server's own check is. Returns
+  /// {success: true, newStreak} on real completion, or
+  /// {success: false, error: '...'} with the server's explanation
+  /// (most commonly: go actually use the feature first) if verification
+  /// fails.
+  Future<Map<String, dynamic>> completeDailyChallenge() async {
+    try {
+      final token = await _getIdToken();
+      final response = await http.post(
+        Uri.parse('$_baseUrl/completeDailyChallenge'),
+        headers: {
+          'Authorization': 'Bearer $token',
+          'Content-Type': 'application/json',
+        },
+      );
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      if (response.statusCode != 200) {
+        return {
+          'success': false,
+          'error': data['error'] ?? 'Could not complete challenge'
+        };
+      }
+      return data;
+    } catch (e) {
+      debugPrint('completeDailyChallenge error: $e');
+      return {'success': false, 'error': 'Network error — try again'};
+    }
+  }
+
+  /// Largest video the backend will analyze — keep in step with
+  /// MAX_VIDEO_BYTES in functions/lib/videoAnalysis.js and the size cap in
+  /// storage.rules (all three are 24MB).
+  static const int _maxAnalysisBytes = 24 * 1024 * 1024;
+
+  /// Lets the AI see what is actually IN a video, so Repurpose output is
+  /// about the video instead of invented from its title. Uploads the video
+  /// already on the phone to a private temporary path (the server reads it
+  /// and deletes it), then asks the server to analyze it.
+  ///
+  /// Returns the analysis key to pass to [processAction], or null if
+  /// analysis isn't possible (file missing/too large, offline, not Pro,
+  /// budget used up, unsupported format). Null is never an error — the
+  /// caller just continues with title-only, the way Repurpose always has.
+  Future<String?> analyzeVideoFile(String localPath) async {
+    try {
+      final file = File(localPath);
+      if (!await file.exists()) return null;
+      final size = await file.length();
+      if (size == 0 || size > _maxAnalysisBytes) return null;
+
+      final uid = FirebaseAuth.instance.currentUser?.uid;
+      if (uid == null) return null;
+
+      final storagePath =
+          'users/$uid/analysis_temp/${DateTime.now().millisecondsSinceEpoch}.mp4';
+      await FirebaseStorage.instance
+          .ref(storagePath)
+          .putFile(file, SettableMetadata(contentType: 'video/mp4'));
+
+      final token = await _getIdToken();
+      final response = await http.post(
+        Uri.parse('$_baseUrl/analyzeVideo'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $token',
+        },
+        body: jsonEncode({'storagePath': storagePath}),
+      );
+      if (response.statusCode != 200) {
+        debugPrint(
+            'analyzeVideo failed (${response.statusCode}): ${response.body}');
+        return null;
+      }
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      return data['analysisKey'] as String?;
+    } catch (e) {
+      debugPrint('analyzeVideoFile error: $e');
+      return null;
+    }
+  }
+
   /// Get library statistics (categories, moods, platforms, top keywords)
   Future<Map<String, dynamic>> getLibraryStats() async {
     try {
@@ -168,6 +318,11 @@ class AIService {
     String? videoTitle,
     String? videoPath,
     String? platform,
+    // Key of an already-completed analyzeVideoFile() result for this video.
+    // The backend looks up the stored transcript summary by it and feeds
+    // the REAL content into the prompt (see functions/lib/repurpose.js).
+    // Optional on purpose: null means title-only, exactly as before.
+    String? analysisKey,
   }) async {
     try {
       final token = await _getIdToken();
@@ -184,6 +339,8 @@ class AIService {
           'videoTitle': videoTitle ?? '',
           'videoPath': videoPath ?? '',
           'platform': platform ?? 'unknown',
+          if (analysisKey != null && analysisKey.isNotEmpty)
+            'analysisKey': analysisKey,
         }),
       );
 
@@ -300,47 +457,6 @@ class AIService {
       debugPrint('Get AI credits error: $e');
       return {'credits': 0, 'isPremium': false};
     }
-  }
-
-  /// Checks — WITHOUT spending anything — whether the branding/overlay
-  /// feature (Quick Edit's replacement) can be used right now. Call this
-  /// before letting the user start compositing, so the paywall/limit
-  /// message shows up front rather than after they've already picked a
-  /// photo and set a price. See consumeBrandingUse() for the matching
-  /// call to make AFTER a successful local save.
-  Future<Map<String, dynamic>> checkBrandingAllowance() async {
-    final token = await _getIdToken();
-    final response = await http.get(
-      Uri.parse('$_baseUrl/checkBrandingAllowance'),
-      headers: {'Authorization': 'Bearer $token'},
-    );
-    if (response.statusCode != 200) {
-      throw Exception('Could not check branding allowance: ${response.body}');
-    }
-    return jsonDecode(response.body);
-  }
-
-  /// Records one branding/overlay use. Call this ONLY after the local
-  /// Canvas compositing + file save has actually succeeded — the server
-  /// re-checks the allowance itself rather than trusting the client, and
-  /// a failed local save must never cost the person their monthly
-  /// allowance, same discipline as translateText's own
-  /// check-then-consume-after-success shape.
-  ///
-  /// Throws on a 429 (allowance exhausted) with the server's real message
-  /// — the caller should catch this and show it, same pattern as
-  /// translation_service.dart does for translateText's own errors.
-  Future<Map<String, dynamic>> consumeBrandingUse() async {
-    final token = await _getIdToken();
-    final response = await http.post(
-      Uri.parse('$_baseUrl/consumeBrandingUse'),
-      headers: {'Authorization': 'Bearer $token'},
-    );
-    final body = jsonDecode(response.body) as Map<String, dynamic>;
-    if (response.statusCode != 200) {
-      throw Exception(body['error']?.toString() ?? 'Could not record branding use');
-    }
-    return body;
   }
 
   /// Verify premium status

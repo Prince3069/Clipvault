@@ -12,6 +12,7 @@
 // tracking actual dollars is the only way the 30% cap is actually accurate.
 
 const admin = require("firebase-admin");
+const {WHISPER_PRICE_PER_MINUTE_USD} = require("./videoAnalysis");
 
 // ── OpenAI pricing — UPDATE THESE if OpenAI changes gpt-4o-mini pricing ───
 // Check current pricing at https://openai.com/api/pricing before trusting
@@ -240,6 +241,40 @@ async function recordSpend(uid, usage) {
 }
 
 /**
+ * Same draw-down pattern as recordSpend above (period allowance first,
+ * then top-up balance) — but for video analysis's two-part real cost:
+ * Whisper transcription (scales with the video's actual duration, not
+ * token count) plus the small LLM pass that summarizes the transcript
+ * (token-based, same as every other action). Called AFTER transcription
+ * completes, using the video's REAL duration — never the upfront
+ * worst-case estimate checkVideoAnalysisAllowance used to decide whether
+ * to even attempt it. Matches the established reserve-then-settle
+ * principle already used elsewhere in this file: check a safe worst case
+ * before doing the work, charge the real cost once it's known.
+ */
+async function recordVideoAnalysisSpend(uid, durationMinutes, llmUsage) {
+  const transcriptionCost = durationMinutes * WHISPER_PRICE_PER_MINUTE_USD;
+  const llmCost = estimateCostUsd(llmUsage);
+  const cost = transcriptionCost + llmCost;
+
+  const state = await getBudgetState(uid);
+  const fromPeriod = Math.min(cost, state.periodRemainingUsd);
+  const fromTopUp = cost - fromPeriod;
+
+  await state.budgetRef.set(
+    {
+      periodAnchor: state.currentAnchor,
+      spentUsd: state.spentUsd + fromPeriod,
+      topUpBalanceUsd: Math.max(0, state.topUpBalanceUsd - fromTopUp),
+      lastPlanId: state.planId,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    },
+    {merge: true},
+  );
+  return cost;
+}
+
+/**
  * Adds a purchased top-up to the user's persistent balance. Called only
  * after the purchase has been verified with Google Play server-to-server —
  * see redeemCreditPurchase in index.js. Idempotent per purchaseToken via the
@@ -297,6 +332,7 @@ module.exports = {
   getBudgetState,
   hasBudgetRemaining,
   recordSpend,
+  recordVideoAnalysisSpend,
   addTopUp,
   spendFromTopUpOnly,
   estimateCostUsd,

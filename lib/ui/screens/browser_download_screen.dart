@@ -4,12 +4,15 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 import '../../providers/media_provider.dart';
 import '../../providers/premium_provider.dart';
+import '../../providers/download_provider.dart';
 import '../../services/cobalt_api_service.dart';
+import '../../services/native_bridge.dart';
 import '../themes/app_theme.dart';
 
 class BrowserDownloadScreen extends StatefulWidget {
@@ -406,9 +409,14 @@ class _BrowserDownloadScreenState extends State<BrowserDownloadScreen> {
       final ext = candidate.url.contains('.webm') ? '.webm' : '.mp4';
       final filename =
           '${_platform}_${DateTime.now().millisecondsSinceEpoch}$ext';
-      final dir = Directory('/storage/emulated/0/Download/MediaNest/$_platform');
-      await dir.create(recursive: true);
-      final savePath = '${dir.path}/$filename';
+      // Saves to a TEMP location first, not directly into a manually-
+      // created Download/MediaNest/$platform folder — see the
+      // saveToMediaStore step right after a successful download for why.
+      // All three download attempts below (Dart HTTP, native Kotlin,
+      // Instagram API re-extraction) write to this same temp path; none
+      // of that logic changes.
+      final tempDir = await getTemporaryDirectory();
+      final savePath = '${tempDir.path}/$filename';
       final minSize = _platform == 'twitter' ? 50 * 1024 : 80 * 1024;
 
       // ── Attempt 1: Dart HTTP with CDN headers ─────────────────────────────
@@ -488,6 +496,23 @@ class _BrowserDownloadScreenState extends State<BrowserDownloadScreen> {
       if (mounted) {
         setState(() => _isDownloading = false);
         if (result != null) {
+          // This is the actual fix for downloads disappearing after the
+          // app restarts: `result` right now is just a temp-directory
+          // path — nothing Android's MediaStore knows about, which is
+          // exactly why it wouldn't survive a restart (unlike TikTok's
+          // downloads, which go through this same saveToMediaStore call
+          // inside download_service.dart and DO persist). Registering it
+          // here, the same way, is what makes Facebook/Instagram/etc.
+          // downloads discoverable again on next launch, not just
+          // visible for the rest of THIS session.
+          final tempResult = result;
+          final registeredPath = await NativeBridge.saveToMediaStore(
+            sourcePath: tempResult,
+            fileName: tempResult.split('/').last,
+            platform: _platform,
+            mimeType: tempResult.endsWith('.webm') ? 'video/webm' : 'video/mp4',
+          );
+          result = registeredPath ?? tempResult; // fall back to the temp path rather than losing the file if MediaStore registration itself fails
           final size = await File(result).length();
           _snack('✅ Saved! ${_fmt(size)}');
           // Clear the "Starting download automatically" banner after 3 seconds
@@ -502,6 +527,24 @@ class _BrowserDownloadScreenState extends State<BrowserDownloadScreen> {
             Provider.of<PremiumProvider>(context, listen: false)
                 .recordDownload();
           } catch (_) {}
+          // The actual fix: this download happened entirely outside
+          // DownloadProvider's own downloadFromUrl() flow, so nothing
+          // told it a file was saved — meaning it could never show up in
+          // saved_screen.dart's platform folders, which read exclusively
+          // from THIS provider. Registering it here is what makes a
+          // browser-fallback download show up the same way a direct
+          // extraction download already does.
+          try {
+            Provider.of<DownloadProvider>(context, listen: false)
+                .registerCompletedDownload(
+              url: widget.url,
+              localPath: result,
+              fileName: result.split('/').last,
+              sourceApp: _platform,
+            );
+          } catch (e) {
+            print('registerCompletedDownload failed (non-fatal): $e');
+          }
         } else {
           setState(() {
             _autoDownloadTriggered = false;

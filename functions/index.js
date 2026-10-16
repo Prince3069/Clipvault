@@ -25,6 +25,7 @@ const {runRepurposeAction, SUPPORTED_ACTIONS} = require("./lib/repurpose");
 const {
   hasBudgetRemaining,
   recordSpend,
+  recordVideoAnalysisSpend,
   addTopUp,
   spendFromTopUpOnly,
   usdToCredits,
@@ -33,6 +34,88 @@ const {
   BRANDING_TOPUP_COST_USD,
 } = require("./lib/budget");
 const {verifyAndConsumePurchase, verifySubscriptionPurchase} = require("./lib/playVerify");
+const {
+  transcribeVideoBytes,
+  summarizeTranscript,
+  MAX_ANALYSIS_MINUTES,
+  MAX_VIDEO_BYTES,
+  WHISPER_PRICE_PER_MINUTE_USD,
+} = require("./lib/videoAnalysis");
+const {generateDailyChallenge} = require("./lib/contentCoach");
+const crypto = require("crypto");
+
+/**
+ * Analyzes a video the app has uploaded to its OWN private temp path
+ * (users/{uid}/analysis_temp/…) — never a URL supplied by the client.
+ * This is what actually fixes "Repurpose generates random content": the
+ * AI now gets what is really said in the video, not just its title.
+ *
+ * Safety/margin properties, each deliberate:
+ *  - The path must sit under the CALLER'S OWN uid prefix, so one user can
+ *    never make the server read (or delete) another user's file.
+ *  - Size is checked from metadata BEFORE downloading, so an oversized
+ *    object is never pulled into memory.
+ *  - Cached by a hash of the video's bytes, so running caption, then
+ *    hashtags, then summary on the same video pays for transcription once.
+ *  - Duration is read from the file before any paid call (see
+ *    videoAnalysis.js), so one analysis can never cost more than
+ *    MAX_ANALYSIS_MINUTES × the per-minute price — the same figure this
+ *    function gates the budget on up front.
+ *  - The temp file is always deleted, success or failure.
+ */
+async function analyzeUploadedVideo(uid, storagePath, openaiKey) {
+  const prefix = `users/${uid}/analysis_temp/`;
+  if (typeof storagePath !== "string" || !storagePath.startsWith(prefix) ||
+      storagePath.includes("..") || storagePath.length > 200) {
+    throw Object.assign(new Error("Invalid upload path"), {httpStatus: 400});
+  }
+
+  const file = admin.storage().bucket().file(storagePath);
+  try {
+    const [meta] = await file.getMetadata();
+    const size = Number(meta.size);
+    if (!size || size > MAX_VIDEO_BYTES) {
+      throw Object.assign(new Error("Video is too large to analyze (24MB limit)"), {httpStatus: 413});
+    }
+    const [buffer] = await file.download();
+
+    const analysisKey = crypto.createHash("sha256").update(buffer).digest("hex");
+    const analysisRef = db.collection("users").doc(uid)
+      .collection("videoAnalysis").doc(analysisKey);
+
+    const cached = await analysisRef.get();
+    if (cached.exists) {
+      const c = cached.data();
+      return {analysisKey, summary: c.summary, keyPhrases: c.keyPhrases, durationMinutes: c.durationMinutes};
+    }
+
+    // Worst-case gate BEFORE any paid call: if even the maximum possible
+    // cost wouldn't fit in what's left of this person's AI budget, don't
+    // attempt it. (The 0.002 covers the small summary pass.)
+    const worstCaseUsd = MAX_ANALYSIS_MINUTES * WHISPER_PRICE_PER_MINUTE_USD + 0.002;
+    const gate = await hasBudgetRemaining(uid, worstCaseUsd);
+    if (!gate.allowed) {
+      throw Object.assign(
+        new Error("Not enough AI budget left for video analysis"),
+        {httpStatus: 429, canBuyCredits: true},
+      );
+    }
+
+    const {transcript, durationMinutes} = await transcribeVideoBytes(openaiKey, buffer);
+    const {summary, keyPhrases, usage} = await summarizeTranscript(openaiKey, transcript);
+    await recordVideoAnalysisSpend(uid, durationMinutes, usage);
+
+    await analysisRef.set({
+      summary,
+      keyPhrases,
+      durationMinutes,
+      analyzedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    return {analysisKey, summary, keyPhrases, durationMinutes};
+  } finally {
+    await file.delete().catch(() => {});
+  }
+}
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -242,6 +325,17 @@ app.post(
         await consumeMonthlyCredit(freeCheck);
       }
 
+      // Server-authored, not client-claimed — this is what
+      // completeDailyChallenge actually checks for a "translate"
+      // challenge. Logged here, as a direct side effect of a real
+      // translation that just genuinely happened, rather than trusting
+      // whatever event name the client might send to /trackEvent.
+      db.collection("users").doc(req.user.uid).collection("events").add({
+        event: "translate_action_completed",
+        properties: {targetLanguage},
+        timestamp: admin.firestore.FieldValue.serverTimestamp(),
+      }).catch((e) => console.error("Coach event log failed (non-critical):", e.message));
+
       const budgetAfter = req.isPremium ? await hasBudgetRemaining(req.user.uid) : null;
       res.json({
         translatedText: translated,
@@ -298,7 +392,7 @@ app.post(
   attachPremiumStatus,
   async (req, res) => {
     try {
-      const {actionId, videoTitle, platform} = req.body;
+      const {actionId, videoTitle, platform, analysisKey} = req.body;
       if (!actionId || !SUPPORTED_ACTIONS.includes(actionId)) {
         return res.status(400).json({
           error: `Unsupported actionId. Supported: ${SUPPORTED_ACTIONS.join(", ")}`,
@@ -318,13 +412,47 @@ app.post(
         });
       }
 
+      // The actual fix for "Repurpose generates random, unrelated
+      // content": when the app has already analyzed this video (see
+      // /analyzeVideo), feed the REAL transcript summary into the prompt
+      // instead of just the title. This reads a stored result — it never
+      // transcribes and never costs anything here, so it cannot fail in a
+      // way that blocks Repurpose; a missing/unknown key simply means
+      // title-only, exactly as before this feature existed.
+      let videoSummary = null;
+      let videoKeyPhrases = null;
+      if (typeof analysisKey === "string" && /^[a-f0-9]{64}$/.test(analysisKey)) {
+        try {
+          const doc = await db.collection("users").doc(req.user.uid)
+            .collection("videoAnalysis").doc(analysisKey).get();
+          if (doc.exists) {
+            videoSummary = doc.data().summary || null;
+            videoKeyPhrases = doc.data().keyPhrases || null;
+          }
+        } catch (e) {
+          console.error("Analysis lookup failed, falling back to title-only:", e.message);
+        }
+      }
+
       const {text: result, usage} = await runRepurposeAction(openaiKey.value(), actionId, {
         videoTitle,
         platform,
+        videoSummary,
+        videoKeyPhrases,
       });
 
       const spent = await recordSpend(req.user.uid, usage);
       const remainingUsd = Math.max(0, budget.remainingUsd - spent);
+
+      // Same reasoning as translateText above — a real, server-authored
+      // record that this feature was genuinely used, for
+      // completeDailyChallenge's "repurpose" verification to check
+      // against.
+      db.collection("users").doc(req.user.uid).collection("events").add({
+        event: "repurpose_action_completed",
+        properties: {actionId},
+        timestamp: admin.firestore.FieldValue.serverTimestamp(),
+      }).catch((e) => console.error("Coach event log failed (non-critical):", e.message));
 
       res.json({
         result,
@@ -419,6 +547,12 @@ app.post("/redeemCreditPurchase", requireAuth, attachPremiumStatus, async (req, 
 app.post("/verifySubscriptionPurchase", requireAuth, async (req, res) => {
   try {
     const {productId, purchaseToken} = req.body;
+    // This single line is the actual fix for the "we can't find his UID
+    // anywhere" problem — nothing in this route ever logged it before.
+    // Every attempt now carries it in the logs, so the NEXT one (success
+    // or failure) tells us exactly who it was, directly from Cloud
+    // Logging, instead of guessing at Firebase Console's Users list.
+    console.log(`verifySubscriptionPurchase called by uid: ${req.user.uid}, productId: ${productId}`);
     if (!productId || !purchaseToken) {
       return res.status(400).json({error: "productId and purchaseToken are required"});
     }
@@ -439,7 +573,10 @@ app.post("/verifySubscriptionPurchase", requireAuth, async (req, res) => {
 
     const verification = await verifySubscriptionPurchase(productId, purchaseToken);
     if (!verification.valid) {
-      console.error("verifySubscriptionPurchase: verification failed:", verification.reason);
+      // uid added here too — this is the exact line that fired for every
+      // one of his failed attempts so far, with no identity attached
+      // until now.
+      console.error(`verifySubscriptionPurchase: verification failed for uid ${req.user.uid}:`, verification.reason);
       return res.status(402).json({error: "Subscription could not be verified with Google Play"});
     }
 
@@ -498,6 +635,129 @@ app.get("/getLibraryStats", requireAuth, async (req, res) => {
 });
 
 // ─── Analytics event logging ─────────────────────────────────────────────
+// ─── AI Content Coach — real daily challenges ───────────────────────────
+//
+// Replaces a static, identical-for-everyone, finite hardcoded pool with
+// one real challenge generated per day, from the person's OWN niche
+// (now read fresh from Firestore every time, not a value frozen at
+// onboarding) and their actual streak length. Cached per calendar day so
+// opening this screen five times today doesn't generate — and charge
+// for — five different challenges.
+app.get("/getDailyChallenge", requireAuth, async (req, res) => {
+  try {
+    const today = new Date().toISOString().slice(0, 10); // "2026-10-04"
+    const userRef = db.collection("users").doc(req.user.uid);
+    const challengeRef = userRef.collection("coachChallenges").doc(today);
+
+    const cached = await challengeRef.get();
+    if (cached.exists) {
+      return res.json(cached.data());
+    }
+
+    const userDoc = await userRef.get();
+    const userData = userDoc.data() || {};
+    // coachNiche now lives in Firestore, not just local SharedPreferences
+    // — this is what actually makes "editing your niche later changes
+    // your challenges automatically" possible at all: a server-side
+    // generator can only react to a setting it can actually read.
+    const niche = userData.coachNiche || "general content creation";
+    const streakDays = userData.coachStreak || 0;
+
+    const budget = await hasBudgetRemaining(req.user.uid, 0.001);
+    if (!budget.allowed) {
+      return res.status(429).json({
+        error: "This billing period's AI budget is used up.",
+        canBuyCredits: true,
+      });
+    }
+
+    const challenge = await generateDailyChallenge(openaiKey.value(), niche, streakDays);
+    const spent = await recordSpend(req.user.uid, challenge.usage);
+
+    const toSave = {
+      title: challenge.title,
+      description: challenge.description,
+      difficulty: challenge.difficulty,
+      verifiable: challenge.verifiable,
+      verifyFeature: challenge.verifyFeature,
+      date: today,
+      completed: false,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+    await challengeRef.set(toSave);
+    res.json({...toSave, remainingCredits: usdToCredits(Math.max(0, budget.remainingUsd - spent))});
+  } catch (e) {
+    console.error("getDailyChallenge error:", e);
+    res.status(502).json({error: "Could not generate today's challenge"});
+  }
+});
+
+app.post("/completeDailyChallenge", requireAuth, async (req, res) => {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const userRef = db.collection("users").doc(req.user.uid);
+    const challengeRef = userRef.collection("coachChallenges").doc(today);
+
+    const snap = await challengeRef.get();
+    if (!snap.exists) {
+      return res.status(400).json({error: "No challenge found for today"});
+    }
+    const challenge = snap.data();
+    if (challenge.completed) {
+      return res.json({success: true, alreadyCompleted: true});
+    }
+
+    // This is the actual fix for "you can just tap completed and it
+    // records it straight up": when a challenge maps to a real app
+    // feature (repurpose/translate/download), check that the feature
+    // was genuinely used TODAY before accepting completion — querying
+    // server-recorded events, not trusting a tap alone. A challenge with
+    // no mapped feature (a brainstorming/research task, say) has no
+    // real signal to check against and is accepted as an honest
+    // self-report, same as it always was for that kind of task.
+    if (challenge.verifiable && challenge.verifyFeature) {
+      const startOfDay = new Date(`${today}T00:00:00.000Z`);
+      let verified = false;
+
+      if (challenge.verifyFeature === "download") {
+        const downloads = await userRef.collection("downloadLog")
+          .where("timestamp", ">=", startOfDay).limit(1).get();
+        verified = !downloads.empty;
+      } else {
+        // repurpose / translate — both log through the general events
+        // collection; event names match what the client already sends.
+        const eventName = challenge.verifyFeature === "repurpose"
+          ? "repurpose_action_completed" : "translate_action_completed";
+        const events = await userRef.collection("events")
+          .where("event", "==", eventName)
+          .where("timestamp", ">=", startOfDay).limit(1).get();
+        verified = !events.empty;
+      }
+
+      if (!verified) {
+        return res.status(400).json({
+          error: `Use ${challenge.verifyFeature} at least once today to complete this challenge.`,
+          verified: false,
+        });
+      }
+    }
+
+    const newStreak = (await userRef.get()).data()?.coachStreak || 0;
+    await challengeRef.update({completed: true, completedAt: admin.firestore.FieldValue.serverTimestamp()});
+    await userRef.set({
+      coachStreak: newStreak + 1,
+      coachPoints: admin.firestore.FieldValue.increment(
+        challenge.difficulty === "hard" ? 30 : challenge.difficulty === "medium" ? 20 : 10,
+      ),
+    }, {merge: true});
+
+    res.json({success: true, newStreak: newStreak + 1});
+  } catch (e) {
+    console.error("completeDailyChallenge error:", e);
+    res.status(502).json({error: "Could not complete challenge"});
+  }
+});
+
 app.post("/trackEvent", requireAuth, async (req, res) => {
   try {
     const {event, properties} = req.body;
@@ -554,7 +814,26 @@ app.get("/getDownloadStats", requireAuth, async (req, res) => {
 const notImplemented = (name) => (req, res) => {
   res.status(501).json({error: `${name} is not implemented on the server yet`});
 };
-app.post("/analyzeVideo", requireAuth, notImplemented("analyzeVideo"));
+app.post("/analyzeVideo", requireAuth, attachPremiumStatus, async (req, res) => {
+  try {
+    // Repurpose Studio is a Pro feature end to end, and this spends real
+    // AI budget — refuse free accounts outright instead of relying on
+    // the budget gate's error to explain it.
+    if (!req.isPremium) {
+      return res.status(402).json({error: "Upgrade to Pro to analyze videos"});
+    }
+    const analysis = await analyzeUploadedVideo(
+      req.user.uid, req.body && req.body.storagePath, openaiKey.value(),
+    );
+    res.json(analysis);
+  } catch (e) {
+    console.error("analyzeVideo error:", e.message);
+    res.status(e.httpStatus || 502).json({
+      error: e.message || "Video analysis failed",
+      canBuyCredits: e.canBuyCredits || false,
+    });
+  }
+});
 app.get("/getAnalyzedVideos", requireAuth, notImplemented("getAnalyzedVideos"));
 app.get("/getLibraryStats2", requireAuth, notImplemented("getLibraryStats2"));
 app.post("/suggestCollections", requireAuth, notImplemented("suggestCollections"));

@@ -510,6 +510,39 @@ class _RepurposeStudioState extends State<RepurposeStudio> {
     );
   }
 
+  /// Gets the "analysis key" for this video so the server can describe
+  /// what is actually IN it, instead of Repurpose inventing output from the
+  /// title alone (the cause of "everything it generates is random").
+  ///
+  /// The first AI action on a video uploads it for analysis; the key is
+  /// remembered on the phone, so every later action on the same video
+  /// reuses it — no second upload, no second charge. Returns null whenever
+  /// analysis isn't possible (offline, too large, unsupported format,
+  /// budget used up); the action then simply runs title-only, exactly as
+  /// it always has. Analysis can never block or fail an action.
+  Future<String?> _ensureAnalysisKey() async {
+    try {
+      final path = widget.videoPath;
+      if (path.isEmpty) return null;
+      final file = File(path);
+      if (!await file.exists()) return null;
+
+      // Keyed by path + size, so editing/replacing a file at the same path
+      // doesn't reuse a stale analysis.
+      final cacheKey = 'analysis_key|$path|${await file.length()}';
+      final prefs = await SharedPreferences.getInstance();
+      final cached = prefs.getString(cacheKey);
+      if (cached != null) return cached;
+
+      final key = await _ai.analyzeVideoFile(path);
+      if (key != null) await prefs.setString(cacheKey, key);
+      return key;
+    } catch (e) {
+      debugPrint('Analysis skipped: $e');
+      return null;
+    }
+  }
+
   Future<void> _handleAction(String actionId) async {
     // Quick Pack - Free deterministic action
     if (actionId == 'quick_pack') {
@@ -584,12 +617,17 @@ class _RepurposeStudioState extends State<RepurposeStudio> {
       _processingMessage = 'Generating with AI...';
       await Future.delayed(const Duration(milliseconds: 300));
 
+      // _isPremium is already true here (AI actions are locked otherwise),
+      // so this upload is never wasted on a free account.
+      final analysisKey = await _ensureAnalysisKey();
+
       final result = await _ai.processAction(
         actionId: actionId,
         videoId: widget.videoId,
         videoTitle: widget.videoTitle,
         videoPath: widget.videoPath,
         platform: widget.platform,
+        analysisKey: analysisKey,
       );
 
       setState(() => _processingProgress = 0.9);

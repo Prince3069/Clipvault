@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../../models/media_file.dart';
 import '../../providers/media_provider.dart';
+import '../../providers/premium_provider.dart';
 import '../../services/native_bridge.dart';
 import '../themes/app_theme.dart';
 import '../widgets/premium/repurpose_studio.dart';
@@ -185,6 +186,14 @@ class _RepurposeStudioScreenState extends State<RepurposeStudioScreen> {
           videoTitle: item.fileName,
           videoPath: item.path,
           platform: item.sourceApp,
+          // The actual fix for "credits don't change after using
+          // Repurpose": the widget updates its OWN private copy of
+          // the number after each action, but the Home counter reads
+          // PremiumProvider's shared value, which nothing was
+          // refreshing. onComplete fires after every successful
+          // action, so this keeps both in step.
+          onComplete: () => Provider.of<PremiumProvider>(context, listen: false)
+              .refreshCreditBalance(),
         ),
       ],
     );

@@ -306,7 +306,18 @@ class MediaProvider extends ChangeNotifier {
         return false;
       }
 
-      _markDownloaded(mediaFile.id);
+      // Also updates each MediaFile's own `path` to the real, permanent
+      // MediaStore location — not just isDownloaded — which is the actual
+      // fix for "works from the Saved tab, 'File not found' from the
+      // Status tab's own viewer": before this, only the flag changed, so
+      // the in-memory item kept pointing at its ORIGINAL location (the
+      // WhatsApp status file, or wherever it started) forever. If that
+      // original file is later cleaned up — WhatsApp does this to its own
+      // status cache — the Status tab's viewer, which opens `item.path`
+      // directly, correctly reports the file gone, while the Saved tab
+      // works fine because it reads the real saved copy's own record, not
+      // this in-memory item at all.
+      _markDownloaded(mediaFile.id, newPath: destPath);
 
       // allMedia (what saved_screen.dart's folder counts read) is only
       // ever populated by this native query — flipping isDownloaded above
@@ -325,24 +336,27 @@ class MediaProvider extends ChangeNotifier {
     }
   }
 
-  /// Update the isDownloaded flag on an item wherever it actually lives —
-  /// _allMedia, _whatsappImages, or _whatsappVideos.
-  void _markDownloaded(String id) {
+  /// Updates the path AND isDownloaded flag on an item wherever it
+  /// actually lives — _allMedia, _whatsappImages, or _whatsappVideos.
+  /// Path was previously left unchanged here — see the comment at the
+  /// call site above for why that was the real bug.
+  void _markDownloaded(String id, {String? newPath}) {
     final allIdx = _allMedia.indexWhere((m) => m.id == id);
     if (allIdx >= 0) {
-      _allMedia[allIdx] = _allMedia[allIdx].copyWith(isDownloaded: true);
+      _allMedia[allIdx] = _allMedia[allIdx]
+          .copyWith(isDownloaded: true, path: newPath ?? _allMedia[allIdx].path);
       return;
     }
     final imgIdx = _whatsappImages.indexWhere((m) => m.id == id);
     if (imgIdx >= 0) {
-      _whatsappImages[imgIdx] =
-          _whatsappImages[imgIdx].copyWith(isDownloaded: true);
+      _whatsappImages[imgIdx] = _whatsappImages[imgIdx].copyWith(
+          isDownloaded: true, path: newPath ?? _whatsappImages[imgIdx].path);
       return;
     }
     final vidIdx = _whatsappVideos.indexWhere((m) => m.id == id);
     if (vidIdx >= 0) {
-      _whatsappVideos[vidIdx] =
-          _whatsappVideos[vidIdx].copyWith(isDownloaded: true);
+      _whatsappVideos[vidIdx] = _whatsappVideos[vidIdx].copyWith(
+          isDownloaded: true, path: newPath ?? _whatsappVideos[vidIdx].path);
     }
   }
 

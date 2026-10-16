@@ -818,7 +818,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             Expanded(
                 child: _commandTile(
                     'Saved Edits',
-                    'View your edited videos',
+                    'Your branded photo exports',
                     Icons.edit_rounded,
                     const Color(0xFF22C55E),
                     () => _open(const SavedEditsScreen()))),

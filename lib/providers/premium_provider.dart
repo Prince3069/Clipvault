@@ -74,27 +74,7 @@ class PremiumProvider extends ChangeNotifier {
     _isLoading = true;
     notifyListeners();
     await _loadFromPrefs();
-    if (_isPremium) {
-      final prefs = await SharedPreferences.getInstance();
-      final savedToken = prefs.getString(_kPurchaseToken);
-      final savedProductId = _plan == PurchasePlan.monthly
-          ? PurchaseService.kMonthlyId
-          : PurchaseService.kAnnualId;
-      if (savedToken != null) {
-        try {
-          // Idempotent on the server (see /verifySubscriptionPurchase) —
-          // safe to call on every app start. This is what keeps the
-          // server's Firestore record current without the client ever
-          // writing premiumExpiry itself.
-          await _verifySubscriptionWithServer(
-            productId: savedProductId,
-            purchaseToken: savedToken,
-          );
-        } catch (e) {
-          print('Startup entitlement re-verification skipped: $e');
-        }
-      }
-    }
+
     await _purchaseService.initialize(
       onPurchaseUpdate: _handlePurchaseUpdate,
       onError: (e) {
@@ -104,6 +84,31 @@ class PremiumProvider extends ChangeNotifier {
     );
     _isLoading = false;
     notifyListeners();
+
+    // This replaces the old `if (_isPremium) { ...re-verify... }` block —
+    // which only ever checked the server if the LOCAL cache already
+    // claimed the person was premium. That's a one-way gate: a person
+    // whose entitlement exists server-side but whose local cache says
+    // "false" (a manually-restored account, a purchase verified on a
+    // different device, or — what actually happened here — every one of
+    // their OWN verification attempts having failed up to now) had no way
+    // to ever discover that server-side truth on app start, no matter how
+    // many times they reopened the app. Restore Purchases worked because
+    // it's the one place that asks Play directly, with no gate at all.
+    //
+    // This makes every app start do that same direct ask — not gated on
+    // what the cache currently believes. Deliberately NOT awaited here:
+    // _isLoading has already cleared above, so this runs in the
+    // background after the person can already see and use the app. If it
+    // finds an active subscription, it flows through the exact same
+    // onPurchaseUpdate → _grantPremiumFromPurchase path a manual restore
+    // uses, which calls notifyListeners() itself — so the UI updates
+    // reactively within a few seconds if something changes, without
+    // making every person wait on a Play Billing round-trip just to open
+    // the app.
+    _purchaseService.restorePurchases().catchError((e) {
+      print('Startup entitlement check skipped: $e');
+    });
   }
 
   Future<void> _loadFromPrefs() async {

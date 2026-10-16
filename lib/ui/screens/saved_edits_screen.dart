@@ -38,6 +38,8 @@ class _SavedEditsScreenState extends State<SavedEditsScreen> {
 
   String _getEditIcon(String editType) {
     switch (editType) {
+      case 'brand_overlay':
+        return '🏷️';
       case 'trim':
         return '✂️';
       case 'frame':
@@ -69,6 +71,8 @@ class _SavedEditsScreenState extends State<SavedEditsScreen> {
 
   String _getEditLabel(String editType) {
     switch (editType) {
+      case 'brand_overlay':
+        return 'Branded photo';
       case 'trim':
         return 'Trimmed';
       case 'frame':
@@ -100,6 +104,8 @@ class _SavedEditsScreenState extends State<SavedEditsScreen> {
 
   Color _getEditColor(String editType) {
     switch (editType) {
+      case 'brand_overlay':
+        return const Color(0xFF10B981);
       case 'trim':
         return const Color(0xFF6C63FF);
       case 'frame':
@@ -380,7 +386,7 @@ class _SavedEditsScreenState extends State<SavedEditsScreen> {
             ),
             const SizedBox(height: 8),
             const Text(
-              'Edit a video and it will appear here',
+              'Brand a photo with your price, name & logo and it will appear here',
               style: TextStyle(
                 color: AppColors.textSecondary,
                 fontSize: 14,
@@ -390,7 +396,7 @@ class _SavedEditsScreenState extends State<SavedEditsScreen> {
             ElevatedButton.icon(
               onPressed: () => Navigator.pop(context),
               icon: const Icon(Icons.edit_rounded),
-              label: const Text('Go Edit a Video'),
+              label: const Text('Go to Quick Edit'),
               style: ElevatedButton.styleFrom(
                 padding: const EdgeInsets.symmetric(
                   horizontal: AppSpacing.lg,

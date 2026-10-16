@@ -120,8 +120,14 @@ async function verifySubscriptionPurchase(productId, purchaseToken) {
   }
 
   try {
-    await publisher.purchases.subscriptionsv2.acknowledge({
+    // purchases.subscriptionsv2 has NO acknowledge method (it only has
+    // get/cancel/defer/revoke) — the previous call here threw a TypeError
+    // that the catch below swallowed, so this server-side safety net never
+    // actually ran. Acknowledgement lives on purchases.subscriptions and
+    // takes the subscriptionId (the product ID) plus the token.
+    await publisher.purchases.subscriptions.acknowledge({
       packageName: PACKAGE_NAME,
+      subscriptionId: productId,
       token: purchaseToken,
     });
   } catch (e) {
