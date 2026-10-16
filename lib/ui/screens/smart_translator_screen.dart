@@ -1,11 +1,19 @@
 // ui/screens/smart_translator_screen.dart
-// COMPLETE - Smart Language Translator with Deepgram + OpenAI
+// COMPLETE - Smart Language Translator with video transcription
 // Features: Speech-to-Text, Translation, Subtitle Generation, Language Detection
+//
+// VIDEO TAB — this used to be dead: it accepted a videoPath constructor
+// argument and did nothing else, so tapping "Extract & Translate" on a
+// screen launched without a path just showed "No video selected". It now
+// has a real picker, uploads the chosen video for transcription, and
+// translates the resulting transcript. Same pipeline Repurpose Studio
+// uses, so a video analyzed once for Repurpose is not re-analyzed here.
 
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import 'package:image_picker/image_picker.dart';
 // ignore: depend_on_referenced_packages
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:permission_handler/permission_handler.dart';
@@ -22,35 +30,45 @@ class Language {
   final String name;
   final String flag;
   final bool isRTL;
+  final String? sttLocaleId;
 
   const Language({
     required this.code,
     required this.name,
     required this.flag,
     this.isRTL = false,
+    this.sttLocaleId,
   });
 
   static const List<Language> supported = [
-    Language(code: 'en', name: 'English', flag: '🇺🇸'),
-    Language(code: 'es', name: 'Spanish', flag: '🇪🇸'),
-    Language(code: 'fr', name: 'French', flag: '🇫🇷'),
-    Language(code: 'de', name: 'German', flag: '🇩🇪'),
-    Language(code: 'it', name: 'Italian', flag: '🇮🇹'),
-    Language(code: 'pt', name: 'Portuguese', flag: '🇵🇹'),
-    Language(code: 'ja', name: 'Japanese', flag: '🇯🇵'),
-    Language(code: 'ko', name: 'Korean', flag: '🇰🇷'),
-    Language(code: 'zh', name: 'Chinese', flag: '🇨🇳'),
-    Language(code: 'ar', name: 'Arabic', flag: '🇸🇦', isRTL: true),
-    Language(code: 'hi', name: 'Hindi', flag: '🇮🇳'),
-    Language(code: 'ru', name: 'Russian', flag: '🇷🇺'),
-    Language(code: 'nl', name: 'Dutch', flag: '🇳🇱'),
-    Language(code: 'tr', name: 'Turkish', flag: '🇹🇷'),
-    Language(code: 'id', name: 'Indonesian', flag: '🇮🇩'),
-    Language(code: 'ms', name: 'Malay', flag: '🇲🇾'),
-    Language(code: 'th', name: 'Thai', flag: '🇹🇭'),
-    Language(code: 'vi', name: 'Vietnamese', flag: '🇻🇳'),
-    Language(code: 'pl', name: 'Polish', flag: '🇵🇱'),
-    Language(code: 'uk', name: 'Ukrainian', flag: '🇺🇦'),
+    Language(code: 'en', name: 'English', flag: '🇺🇸', sttLocaleId: 'en_US'),
+    Language(code: 'es', name: 'Spanish', flag: '🇪🇸', sttLocaleId: 'es_ES'),
+    Language(code: 'fr', name: 'French', flag: '🇫🇷', sttLocaleId: 'fr_FR'),
+    Language(code: 'de', name: 'German', flag: '🇩🇪', sttLocaleId: 'de_DE'),
+    Language(code: 'it', name: 'Italian', flag: '🇮🇹', sttLocaleId: 'it_IT'),
+    Language(
+        code: 'pt', name: 'Portuguese', flag: '🇵🇹', sttLocaleId: 'pt_PT'),
+    Language(code: 'ja', name: 'Japanese', flag: '🇯🇵', sttLocaleId: 'ja_JP'),
+    Language(code: 'ko', name: 'Korean', flag: '🇰🇷', sttLocaleId: 'ko_KR'),
+    Language(code: 'zh', name: 'Chinese', flag: '🇨🇳', sttLocaleId: 'zh_CN'),
+    Language(
+        code: 'ar',
+        name: 'Arabic',
+        flag: '🇸🇦',
+        isRTL: true,
+        sttLocaleId: 'ar_SA'),
+    Language(code: 'hi', name: 'Hindi', flag: '🇮🇳', sttLocaleId: 'hi_IN'),
+    Language(code: 'ru', name: 'Russian', flag: '🇷🇺', sttLocaleId: 'ru_RU'),
+    Language(code: 'nl', name: 'Dutch', flag: '🇳🇱', sttLocaleId: 'nl_NL'),
+    Language(code: 'tr', name: 'Turkish', flag: '🇹🇷', sttLocaleId: 'tr_TR'),
+    Language(
+        code: 'id', name: 'Indonesian', flag: '🇮🇩', sttLocaleId: 'id_ID'),
+    Language(code: 'ms', name: 'Malay', flag: '🇲🇾', sttLocaleId: 'ms_MY'),
+    Language(code: 'th', name: 'Thai', flag: '🇹🇭', sttLocaleId: 'th_TH'),
+    Language(
+        code: 'vi', name: 'Vietnamese', flag: '🇻🇳', sttLocaleId: 'vi_VN'),
+    Language(code: 'pl', name: 'Polish', flag: '🇵🇱', sttLocaleId: 'pl_PL'),
+    Language(code: 'uk', name: 'Ukrainian', flag: '🇺🇦', sttLocaleId: 'uk_UA'),
   ];
 
   static Language? fromCode(String code) {
@@ -83,6 +101,7 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
   final AIService _ai = AIService();
   final StorageService _storage = StorageService();
   final stt.SpeechToText _speech = stt.SpeechToText();
+  final ImagePicker _imagePicker = ImagePicker();
 
   // ─── State ─────────────────────────────────────────────────────────────
   bool _isInitialized = false;
@@ -95,6 +114,12 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
   String _error = '';
   double _progress = 0.0;
   String _status = '';
+
+  // ─── Video state ──────────────────────────────────────────────────────
+  String? _pickedVideoPath;
+  String? _pickedVideoTitle;
+  bool _isPickingVideo = false;
+  bool _transcriptTruncated = false;
 
   // ─── Language Selection ──────────────────────────────────────────────
   Language _sourceLanguage = Language.supported.first;
@@ -113,11 +138,20 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
   // ─── Tabs ─────────────────────────────────────────────────────────────
   int _selectedTab = 0; // 0: Text, 1: Speech, 2: Video
 
+  /// Server-side cap on /translateText — see functions/index.js. Chunking
+  /// here would produce fragmented translations that read badly when
+  /// stitched; truncating at a sentence boundary and being upfront about
+  /// it is more honest than silently translating part of the video.
+  static const int _maxTranslateChars = 4000;
+  static const int _softTranslateChars = 3800; // leave headroom for "…"
+
   @override
   void initState() {
     super.initState();
     _textController = TextEditingController(text: widget.initialText ?? '');
     _transcript = widget.initialText ?? '';
+    _pickedVideoPath = widget.videoPath;
+    _pickedVideoTitle = widget.videoTitle;
     _initSpeech();
     _pulseController = AnimationController(
       duration: const Duration(milliseconds: 1200),
@@ -131,8 +165,6 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
       _detectLanguage();
     }
 
-    // Pulls the real balance from the backend so the badge in the AppBar
-    // shows something true, not a guess — see PremiumProvider.remainingCredits.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
         Provider.of<PremiumProvider>(context, listen: false)
@@ -153,11 +185,6 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
 
   Future<void> _initSpeech() async {
     try {
-      // speech_to_text needs RECORD_AUDIO — without it (or if the person
-      // denies the prompt), initialize() just returns false with no error
-      // detail, which is what showed up as a bare "Speech recognition not
-      // available". Requesting it explicitly here gives a real, actionable
-      // message instead.
       final micStatus = await Permission.microphone.request();
       if (!micStatus.isGranted) {
         setState(() => _error = micStatus.isPermanentlyDenied
@@ -169,7 +196,6 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
 
       _isInitialized = await _speech.initialize(
         onError: (error) {
-          // Fix: Use errorMsg instead of description
           setState(() => _error = error.errorMsg ?? 'Speech recognition error');
         },
         onStatus: (status) {
@@ -187,14 +213,12 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
       setState(() => _error = 'Failed to initialize speech: $e');
     }
   }
+
   // ─── Language Detection ──────────────────────────────────────────────
 
   Future<void> _detectLanguage() async {
     if (_transcript.isEmpty) return;
 
-    // Auto-detect is Pro-only. This runs automatically while typing/after
-    // speech, not from an explicit tap, so a free user shouldn't get a
-    // popup interrupting them mid-sentence — it just quietly doesn't run.
     final isPremium =
         Provider.of<PremiumProvider>(context, listen: false).isPremium;
     if (!isPremium) return;
@@ -266,7 +290,11 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
         listenFor: const Duration(seconds: 60),
         pauseFor: const Duration(seconds: 5),
         partialResults: true,
-        localeId: 'en_US',
+        // Use the SOURCE language's locale — hardcoding en_US broke every
+        // non-English speaker. This maps the picker selection through to
+        // the recognizer; when a language has no sttLocaleId, fall back
+        // to the platform default so behavior is no worse than before.
+        localeId: _sourceLanguage.sttLocaleId ?? 'en_US',
       );
     } catch (e) {
       setState(() {
@@ -297,6 +325,20 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
     final isPremium =
         Provider.of<PremiumProvider>(context, listen: false).isPremium;
 
+    // Server caps input at 4000 chars. A 10-minute video transcript can
+    // easily exceed that, so trim at a sentence boundary rather than
+    // silently failing on the server — and tell the user, so the result
+    // isn't mistaken for a complete translation.
+    String textToTranslate = _transcript;
+    bool truncated = false;
+    if (textToTranslate.length > _maxTranslateChars) {
+      final cut = textToTranslate.substring(0, _softTranslateChars);
+      final lastStop = cut.lastIndexOf(RegExp(r'[.!?。！？]\s'));
+      textToTranslate =
+          (lastStop > 200 ? cut.substring(0, lastStop + 1) : cut).trimRight();
+      truncated = true;
+    }
+
     setState(() {
       _isProcessing = true;
       _status = 'Translating...';
@@ -304,17 +346,17 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
       _translation = '';
       _showTranslation = false;
       _progress = 0.0;
+      _transcriptTruncated = truncated;
     });
 
     try {
-      // Simulate progress
       for (int i = 0; i <= 10; i++) {
         await Future.delayed(const Duration(milliseconds: 100));
-        setState(() => _progress = i / 10);
+        if (mounted) setState(() => _progress = i / 10);
       }
 
       final translation = await _ai.translateText(
-        text: _transcript,
+        text: textToTranslate,
         targetLanguage: _targetLanguage.code,
         sourceLanguage: _sourceLanguage.code,
       );
@@ -327,26 +369,20 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
         _progress = 1.0;
       });
 
-      // Refresh the badge so it reflects the translation that was just used.
       if (mounted) {
         Provider.of<PremiumProvider>(context, listen: false)
             .refreshCreditBalance();
       }
 
-      // Track usage
       await _ai.trackEvent('translation_completed', properties: {
         'source': _sourceLanguage.code,
         'target': _targetLanguage.code,
-        'text_length': _transcript.length,
+        'text_length': textToTranslate.length,
+        'truncated': truncated,
         'is_premium': isPremium,
       });
     } catch (e) {
       if (!mounted) return;
-      // ai_service.dart already extracts the server's real message (e.g.
-      // "Your free translation for this month is used — upgrade to Pro for
-      // unlimited, or wait until next month for another free one.") —
-      // showing that beats a generic "check your connection" message that
-      // hides exactly what happened and what to do about it.
       final message = e.toString().replaceFirst('Exception: ', '');
       setState(() {
         _error = message;
@@ -355,19 +391,101 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
         _isProcessing = false;
         _status = '';
       });
-      // Refresh the badge either way — the server no longer spends a free
-      // credit on a failed attempt, but the badge should never sit stale
-      // showing a number that doesn't match what the server actually has.
-      Provider.of<PremiumProvider>(context, listen: false)
-          .refreshCreditBalance();
+      if (mounted) {
+        Provider.of<PremiumProvider>(context, listen: false)
+            .refreshCreditBalance();
+      }
     }
   }
 
-  // ─── Video Subtitle Extraction ──────────────────────────────────────
+  // ─── Video Picking & Extraction ─────────────────────────────────────
+
+  /// Requests Android/iOS media permissions before launching the picker.
+  /// image_picker on Android 13+ normally uses the system Photo Picker
+  /// (no permission needed) — but on many OEM builds (Xiaomi, Realme,
+  /// Tecno, Infinix, Samsung One UI etc.) it silently falls back to
+  /// ACTION_GET_CONTENT, which returns null when media read is denied.
+  /// That's the exact bug this is here to prevent.
+  Future<bool> _ensureMediaPermission({required bool forVideo}) async {
+    if (!Platform.isAndroid) return true; // iOS handled by Info.plist prompt
+
+    try {
+      // Android 13+ modern permission first.
+      final modern = forVideo ? Permission.videos : Permission.photos;
+      if (await modern.isGranted) return true;
+      var s = await modern.request();
+      if (s.isGranted || s.isLimited) return true;
+
+      // Fall back to legacy storage permission for Android 12 and below
+      // (also covers devices where the modern permission type is a no-op).
+      if (await Permission.storage.isGranted) return true;
+      s = await Permission.storage.request();
+      return s.isGranted;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  Future<void> _pickVideoFromDevice() async {
+    if (_isPickingVideo) return;
+    setState(() {
+      _isPickingVideo = true;
+      _error = '';
+    });
+
+    try {
+      final ok = await _ensureMediaPermission(forVideo: true);
+      if (!ok) {
+        if (mounted) {
+          setState(() {
+            _isPickingVideo = false;
+            _error = 'Media access is required to choose a video. Enable '
+                'it in Settings → Apps → MediaNest → Permissions.';
+          });
+        }
+        return;
+      }
+
+      final XFile? picked = await _imagePicker.pickVideo(
+        source: ImageSource.gallery,
+        maxDuration: const Duration(minutes: 10),
+      );
+
+      if (!mounted) return;
+
+      if (picked == null) {
+        // Two possible reasons: user cancelled, or the picker silently
+        // failed. We can't distinguish them, but the second case is the
+        // real bug users hit — surface a helpful message either way.
+        setState(() {
+          _isPickingVideo = false;
+          _error = 'No video selected. If the picker didn\'t open, check '
+              'that MediaNest has permission to access videos.';
+        });
+        return;
+      }
+
+      setState(() {
+        _pickedVideoPath = picked.path;
+        _pickedVideoTitle = picked.name;
+        _isPickingVideo = false;
+        _error = '';
+      });
+    } catch (e) {
+      debugPrint('Pick video error: $e');
+      if (mounted) {
+        setState(() {
+          _isPickingVideo = false;
+          _error = 'Could not open the picker: $e';
+        });
+      }
+    }
+  }
 
   Future<void> _extractFromVideo() async {
-    if (widget.videoPath == null || widget.videoPath!.isEmpty) {
-      setState(() => _error = 'No video selected');
+    final path = _pickedVideoPath;
+    if (path == null || path.isEmpty) {
+      setState(() => _error = 'Choose a video first');
       return;
     }
 
@@ -380,47 +498,101 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
 
     setState(() {
       _isProcessing = true;
-      _status = 'Extracting audio from video...';
+      _status = 'Uploading video for transcription...';
       _error = '';
       _progress = 0.0;
+      _transcript = '';
+      _translation = '';
+      _showTranslation = false;
+      _transcriptTruncated = false;
     });
 
     try {
-      // This would use Deepgram to transcribe audio from video
-      // For now, simulate the process
-      for (int i = 0; i <= 20; i++) {
-        await Future.delayed(const Duration(milliseconds: 200));
-        setState(() => _progress = i / 20);
-        if (i < 10) {
-          _status = 'Extracting audio...';
-        } else if (i < 15) {
-          _status = 'Transcribing speech...';
-        } else {
-          _status = 'Processing...';
-        }
+      // Fake progress during the (unprogressable) upload+transcribe step.
+      // The real signal is the analyzeVideoFileFull() return, not these
+      // ticks — this exists only so the UI isn't frozen on "0%".
+      _tickProgress();
+
+      final result = await _ai.analyzeVideoFileFull(path);
+
+      if (!mounted) return;
+
+      if (result == null) {
+        setState(() {
+          _isProcessing = false;
+          _progress = 0;
+          _status = '';
+          _error = 'Could not analyze this video. It may be too large '
+              '(over 24MB), a format the analyzer can\'t read, or the '
+              'upload was interrupted.';
+        });
+        return;
       }
 
-      // Simulate transcript from video
+      final transcript = (result['transcript'] as String?)?.trim() ?? '';
+      if (transcript.isEmpty) {
+        setState(() {
+          _isProcessing = false;
+          _progress = 1.0;
+          _status = '';
+          _error = 'No speech detected in this video — nothing to '
+              'translate. If it has voiceover, check that the audio '
+              'isn\'t muted.';
+        });
+        return;
+      }
+
       setState(() {
-        _transcript =
-            'This is a simulated transcript from the video. In production, '
-            'Deepgram would transcribe the actual audio content from your video file.';
+        _transcript = transcript;
+        _textController.text = transcript;
         _isProcessing = false;
-        _status = '';
         _progress = 1.0;
-        _detectLanguage();
+        _status = '';
       });
 
       await _ai.trackEvent('video_transcription', properties: {
-        'video_title': widget.videoTitle ?? 'Unknown',
+        'video_title': _pickedVideoTitle ?? 'unknown',
+        'transcript_length': transcript.length,
         'is_premium': isPremium,
       });
+
+      if (mounted) {
+        Provider.of<PremiumProvider>(context, listen: false)
+            .refreshCreditBalance();
+      }
     } catch (e) {
+      if (!mounted) return;
+      final message = e.toString().replaceFirst('Exception: ', '');
       setState(() {
-        _error = 'Video processing failed: $e';
+        _error = message;
         _isProcessing = false;
+        _status = '';
       });
     }
+  }
+
+  /// Animates _progress up to ~0.9 while the real work happens, then
+  /// stops. _extractFromVideo jumps it to 1.0 on success.
+  void _tickProgress() {
+    Future<void> ticker() async {
+      for (int i = 0; i < 18; i++) {
+        await Future.delayed(const Duration(milliseconds: 400));
+        if (!mounted || !_isProcessing) return;
+        if (_progress >= 0.9) return;
+        setState(() {
+          _progress += 0.05;
+          if (_progress < 0.3) {
+            _status = 'Uploading video...';
+          } else if (_progress < 0.7) {
+            _status = 'Transcribing speech...';
+          } else {
+            _status = 'Almost done...';
+          }
+        });
+      }
+    }
+
+    ticker();
   }
 
   // ─── Export Functions ────────────────────────────────────────────────
@@ -471,7 +643,6 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
       final path = await _storage.getPlatformDownloadPath('Subtitles');
       final fullPath = '$path/$fileName';
 
-      // Generate SRT format
       final content = _generateSRT();
       final file = File(fullPath);
       await file.writeAsString(content);
@@ -492,16 +663,19 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
 
   String _generateSRT() {
     final text = _showTranslation ? _translation : _transcript;
-    final lines = text.split('\n');
+    final lines = text.split(RegExp(r'[\n.!?]+'));
     final srt = StringBuffer();
 
-    for (int i = 0; i < lines.length; i++) {
-      if (lines[i].trim().isEmpty) continue;
+    var i = 0;
+    for (final raw in lines) {
+      final line = raw.trim();
+      if (line.isEmpty) continue;
       srt.writeln(i + 1);
       srt.writeln('00:00:${(i * 3).toString().padLeft(2, '0')},000 --> '
           '00:00:${((i + 1) * 3).toString().padLeft(2, '0')},000');
-      srt.writeln(lines[i].trim());
+      srt.writeln(line);
       srt.writeln();
+      i++;
     }
 
     return srt.toString();
@@ -551,10 +725,7 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(
-                  onPressed: () {
-                    Navigator.pop(context);
-                    // Navigate to premium
-                  },
+                  onPressed: () => Navigator.pop(context),
                   child: const Text('Upgrade to Pro'),
                 ),
               ),
@@ -736,10 +907,7 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
   Widget _buildContent() {
     return Column(
       children: [
-        // ─── Tabs ──────────────────────────────────────────────────────────
         _buildTabs(),
-
-        // ─── Content ──────────────────────────────────────────────────────
         Expanded(
           child: IndexedStack(
             index: _selectedTab,
@@ -816,11 +984,8 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
       padding: const EdgeInsets.all(AppSpacing.md),
       child: Column(
         children: [
-          // Language selector
           _buildLanguageSelector(),
           const SizedBox(height: AppSpacing.md),
-
-          // Input area
           Expanded(
             child: Container(
               decoration: BoxDecoration(
@@ -831,7 +996,6 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
               ),
               child: Column(
                 children: [
-                  // Header
                   Padding(
                     padding: const EdgeInsets.all(AppSpacing.md),
                     child: Row(
@@ -852,7 +1016,6 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
                     ),
                   ),
                   const Divider(height: 1),
-                  // Text input
                   Expanded(
                     child: TextField(
                       maxLines: null,
@@ -889,10 +1052,7 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
               ),
             ),
           ),
-
           const SizedBox(height: AppSpacing.md),
-
-          // Action buttons
           Row(
             children: [
               Expanded(
@@ -922,179 +1082,187 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
                 ),
             ],
           ),
-
-          // Translation result
           if (_showTranslation && _translation.isNotEmpty) ...[
             const SizedBox(height: AppSpacing.md),
-            Container(
-              padding: const EdgeInsets.all(AppSpacing.md),
-              decoration: BoxDecoration(
-                color: AppColors.primary.withValues(alpha: 0.04),
-                borderRadius: BorderRadius.circular(AppRadius.lg),
-                border: Border.all(
-                  color: AppColors.primary.withValues(alpha: 0.15),
+            _buildTranslationResult(),
+          ],
+          if (_error.isNotEmpty) ...[
+            const SizedBox(height: AppSpacing.sm),
+            _buildErrorBox(),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTranslationResult() {
+    return Container(
+      padding: const EdgeInsets.all(AppSpacing.md),
+      decoration: BoxDecoration(
+        color: AppColors.primary.withValues(alpha: 0.04),
+        borderRadius: BorderRadius.circular(AppRadius.lg),
+        border: Border.all(
+          color: AppColors.primary.withValues(alpha: 0.15),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(
+                Icons.check_circle_rounded,
+                color: AppColors.success,
+                size: 16,
+              ),
+              const SizedBox(width: AppSpacing.sm),
+              Expanded(
+                child: Text(
+                  'Translation (${_targetLanguage.name})',
+                  style: AppTypography.titleMedium,
                 ),
               ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+              IconButton(
+                onPressed: () {
+                  Clipboard.setData(ClipboardData(text: _translation));
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Translation copied'),
+                      backgroundColor: AppColors.success,
+                      behavior: SnackBarBehavior.floating,
+                      duration: Duration(seconds: 2),
+                    ),
+                  );
+                },
+                icon: const Icon(Icons.copy_rounded, size: 16),
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
+              ),
+            ],
+          ),
+          if (_transcriptTruncated) ...[
+            const SizedBox(height: 4),
+            const Text(
+              'Showing first ~3800 characters only.',
+              style: TextStyle(color: AppColors.warning, fontSize: 11),
+            ),
+          ],
+          const SizedBox(height: AppSpacing.sm),
+          Text(
+            _translation,
+            style: const TextStyle(
+              fontSize: 16,
+              height: 1.5,
+              color: AppColors.textPrimary,
+            ),
+          ),
+          if (_targetLanguage.isRTL) ...[
+            const SizedBox(height: AppSpacing.sm),
+            Container(
+              padding: const EdgeInsets.all(AppSpacing.sm),
+              decoration: BoxDecoration(
+                color: AppColors.info.withValues(alpha: 0.06),
+                borderRadius: BorderRadius.circular(AppRadius.sm),
+              ),
+              child: const Row(
                 children: [
-                  Row(
-                    children: [
-                      const Icon(
-                        Icons.check_circle_rounded,
-                        color: AppColors.success,
-                        size: 16,
-                      ),
-                      const SizedBox(width: AppSpacing.sm),
-                      Text(
-                        'Translation (${_targetLanguage.name})',
-                        style: AppTypography.titleMedium,
-                      ),
-                      const Spacer(),
-                      IconButton(
-                        onPressed: () {
-                          Clipboard.setData(ClipboardData(text: _translation));
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('Translation copied'),
-                              backgroundColor: AppColors.success,
-                              behavior: SnackBarBehavior.floating,
-                              duration: Duration(seconds: 2),
-                            ),
-                          );
-                        },
-                        icon: const Icon(Icons.copy_rounded, size: 16),
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(),
-                      ),
-                    ],
+                  Icon(
+                    Icons.info_outline_rounded,
+                    color: AppColors.info,
+                    size: 14,
                   ),
-                  const SizedBox(height: AppSpacing.sm),
+                  SizedBox(width: AppSpacing.sm),
                   Text(
-                    _translation,
-                    style: const TextStyle(
-                      fontSize: 16,
-                      height: 1.5,
-                      color: AppColors.textPrimary,
+                    'Right-to-Left language detected',
+                    style: TextStyle(
+                      color: AppColors.info,
+                      fontSize: 11,
                     ),
                   ),
-                  if (_targetLanguage.isRTL)
-                    const SizedBox(height: AppSpacing.sm),
-                  if (_targetLanguage.isRTL)
-                    Container(
-                      padding: const EdgeInsets.all(AppSpacing.sm),
-                      decoration: BoxDecoration(
-                        color: AppColors.info.withValues(alpha: 0.06),
-                        borderRadius: BorderRadius.circular(AppRadius.sm),
-                      ),
-                      child: const Row(
-                        children: [
-                          Icon(
-                            Icons.info_outline_rounded,
-                            color: AppColors.info,
-                            size: 14,
-                          ),
-                          SizedBox(width: AppSpacing.sm),
-                          Text(
-                            'Right-to-Left language detected',
-                            style: TextStyle(
-                              color: AppColors.info,
-                              fontSize: 11,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
                 ],
               ),
             ),
           ],
+        ],
+      ),
+    );
+  }
 
-          // Error — the "free translation used up" case gets a proper
-          // upgrade nudge instead of a scary red error, since it's not
-          // really an error, it's an expected limit with a clear next step.
-          if (_error.isNotEmpty) ...[
+  Widget _buildErrorBox() {
+    if (_error.toLowerCase().contains('free translation')) {
+      return Container(
+        padding: const EdgeInsets.all(AppSpacing.md),
+        decoration: BoxDecoration(
+          color: AppColors.primary.withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(AppRadius.md),
+          border: Border.all(color: AppColors.primary.withValues(alpha: 0.25)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.workspace_premium_rounded,
+                    color: AppColors.primary, size: 18),
+                const SizedBox(width: AppSpacing.sm),
+                const Expanded(
+                  child: Text(
+                    'That was your free translation for this month',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w700,
+                      color: AppColors.primary,
+                      fontSize: 13,
+                    ),
+                  ),
+                ),
+                GestureDetector(
+                  onTap: () => setState(() => _error = ''),
+                  child: const Icon(Icons.close_rounded,
+                      color: AppColors.primary, size: 16),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            const Text(
+              'Go Pro for unlimited translation, or wait until next '
+              'month for another free one.',
+              style: TextStyle(fontSize: 12, color: AppColors.textSecondary),
+            ),
             const SizedBox(height: AppSpacing.sm),
-            if (_error.toLowerCase().contains('free translation'))
-              Container(
-                padding: const EdgeInsets.all(AppSpacing.md),
-                decoration: BoxDecoration(
-                  color: AppColors.primary.withValues(alpha: 0.08),
-                  borderRadius: BorderRadius.circular(AppRadius.md),
-                  border: Border.all(
-                      color: AppColors.primary.withValues(alpha: 0.25)),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        const Icon(Icons.workspace_premium_rounded,
-                            color: AppColors.primary, size: 18),
-                        const SizedBox(width: AppSpacing.sm),
-                        const Expanded(
-                          child: Text(
-                            'That was your free translation for this month',
-                            style: TextStyle(
-                              fontWeight: FontWeight.w700,
-                              color: AppColors.primary,
-                              fontSize: 13,
-                            ),
-                          ),
-                        ),
-                        GestureDetector(
-                          onTap: () => setState(() => _error = ''),
-                          child: const Icon(Icons.close_rounded,
-                              color: AppColors.primary, size: 16),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 6),
-                    const Text(
-                      'Go Pro for unlimited translation, or wait until next '
-                      'month for another free one.',
-                      style: TextStyle(
-                          fontSize: 12, color: AppColors.textSecondary),
-                    ),
-                    const SizedBox(height: AppSpacing.sm),
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton(
-                        onPressed: _showPremiumDialog,
-                        child: const Text('Upgrade to Pro'),
-                      ),
-                    ),
-                  ],
-                ),
-              )
-            else
-              Container(
-                padding: const EdgeInsets.all(AppSpacing.sm),
-                decoration: BoxDecoration(
-                  color: AppColors.error.withValues(alpha: 0.06),
-                  borderRadius: BorderRadius.circular(AppRadius.md),
-                ),
-                child: Row(
-                  children: [
-                    const Icon(Icons.error_outline_rounded,
-                        color: AppColors.error, size: 16),
-                    const SizedBox(width: AppSpacing.sm),
-                    Expanded(
-                      child: Text(
-                        _error,
-                        style: const TextStyle(
-                            color: AppColors.error, fontSize: 13),
-                      ),
-                    ),
-                    GestureDetector(
-                      onTap: () => setState(() => _error = ''),
-                      child: const Icon(Icons.close_rounded,
-                          color: AppColors.error, size: 16),
-                    ),
-                  ],
-                ),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                onPressed: _showPremiumDialog,
+                child: const Text('Upgrade to Pro'),
               ),
+            ),
           ],
+        ),
+      );
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(AppSpacing.sm),
+      decoration: BoxDecoration(
+        color: AppColors.error.withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(AppRadius.md),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.error_outline_rounded,
+              color: AppColors.error, size: 16),
+          const SizedBox(width: AppSpacing.sm),
+          Expanded(
+            child: Text(
+              _error,
+              style: const TextStyle(color: AppColors.error, fontSize: 13),
+            ),
+          ),
+          GestureDetector(
+            onTap: () => setState(() => _error = ''),
+            child: const Icon(Icons.close_rounded,
+                color: AppColors.error, size: 16),
+          ),
         ],
       ),
     );
@@ -1107,11 +1275,8 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
       padding: const EdgeInsets.all(AppSpacing.md),
       child: Column(
         children: [
-          // Language selector
           _buildLanguageSelector(),
           const SizedBox(height: AppSpacing.md),
-
-          // Speech area
           Expanded(
             child: Container(
               decoration: BoxDecoration(
@@ -1167,8 +1332,6 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
                     ),
                   ),
                   const Divider(height: 1),
-
-                  // Transcript
                   Expanded(
                     child: SingleChildScrollView(
                       padding: const EdgeInsets.all(AppSpacing.md),
@@ -1186,8 +1349,6 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
                       ),
                     ),
                   ),
-
-                  // Progress
                   if (_isProcessing) ...[
                     Padding(
                       padding: const EdgeInsets.all(AppSpacing.md),
@@ -1213,10 +1374,7 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
               ),
             ),
           ),
-
           const SizedBox(height: AppSpacing.md),
-
-          // Mic button
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
@@ -1248,10 +1406,7 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
               ),
             ],
           ),
-
           const SizedBox(height: AppSpacing.md),
-
-          // Actions
           if (_transcript.isNotEmpty)
             Row(
               children: [
@@ -1282,65 +1437,13 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
                   ),
               ],
             ),
-
-          // Translation result
           if (_showTranslation && _translation.isNotEmpty) ...[
             const SizedBox(height: AppSpacing.md),
-            Container(
-              padding: const EdgeInsets.all(AppSpacing.md),
-              decoration: BoxDecoration(
-                color: AppColors.primary.withValues(alpha: 0.04),
-                borderRadius: BorderRadius.circular(AppRadius.lg),
-                border: Border.all(
-                  color: AppColors.primary.withValues(alpha: 0.15),
-                ),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      const Icon(
-                        Icons.check_circle_rounded,
-                        color: AppColors.success,
-                        size: 16,
-                      ),
-                      const SizedBox(width: AppSpacing.sm),
-                      Text(
-                        'Translation (${_targetLanguage.name})',
-                        style: AppTypography.titleMedium,
-                      ),
-                      const Spacer(),
-                      IconButton(
-                        onPressed: () {
-                          Clipboard.setData(ClipboardData(text: _translation));
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('Translation copied'),
-                              backgroundColor: AppColors.success,
-                              behavior: SnackBarBehavior.floating,
-                              duration: Duration(seconds: 2),
-                            ),
-                          );
-                        },
-                        icon: const Icon(Icons.copy_rounded, size: 16),
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: AppSpacing.sm),
-                  Text(
-                    _translation,
-                    style: const TextStyle(
-                      fontSize: 16,
-                      height: 1.5,
-                      color: AppColors.textPrimary,
-                    ),
-                  ),
-                ],
-              ),
-            ),
+            _buildTranslationResult(),
+          ],
+          if (_error.isNotEmpty) ...[
+            const SizedBox(height: AppSpacing.sm),
+            _buildErrorBox(),
           ],
         ],
       ),
@@ -1350,15 +1453,16 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
   // ─── Tab: Video ──────────────────────────────────────────────────────
 
   Widget _buildVideoTab() {
-    return Padding(
+    final hasVideo = _pickedVideoPath != null && _pickedVideoPath!.isNotEmpty;
+
+    return SingleChildScrollView(
       padding: const EdgeInsets.all(AppSpacing.md),
       child: Column(
         children: [
-          // Language selector
           _buildLanguageSelector(),
           const SizedBox(height: AppSpacing.md),
 
-          // Video info
+          // Video slot — shows selected video or invites selection
           Container(
             padding: const EdgeInsets.all(AppSpacing.md),
             decoration: BoxDecoration(
@@ -1388,7 +1492,9 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        widget.videoTitle ?? 'No video selected',
+                        hasVideo
+                            ? (_pickedVideoTitle ?? 'Selected video')
+                            : 'No video selected',
                         style: AppTypography.bodyMedium.copyWith(
                           fontWeight: FontWeight.w600,
                         ),
@@ -1396,7 +1502,9 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
                         overflow: TextOverflow.ellipsis,
                       ),
                       Text(
-                        'Extract and translate audio from video',
+                        hasVideo
+                            ? 'Ready to extract and translate'
+                            : 'Choose a video to extract its speech',
                         style: AppTypography.caption.copyWith(
                           color: AppColors.textMuted,
                         ),
@@ -1404,7 +1512,7 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
                     ],
                   ),
                 ),
-                if (widget.videoPath != null)
+                if (hasVideo)
                   Container(
                     padding: const EdgeInsets.symmetric(
                       horizontal: AppSpacing.sm,
@@ -1415,7 +1523,7 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
                       borderRadius: BorderRadius.circular(AppRadius.sm),
                     ),
                     child: const Text(
-                      'Selected',
+                      'Ready',
                       style: TextStyle(
                         color: AppColors.success,
                         fontSize: 10,
@@ -1429,11 +1537,35 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
 
           const SizedBox(height: AppSpacing.md),
 
-          // Process button
+          // Choose video button
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: _isPickingVideo ? null : _pickVideoFromDevice,
+              icon: _isPickingVideo
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.video_library_rounded, size: 18),
+              label: Text(
+                hasVideo ? 'Choose a different video' : 'Choose a video',
+              ),
+              style: OutlinedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(vertical: 14),
+              ),
+            ),
+          ),
+
+          const SizedBox(height: AppSpacing.sm),
+
+          // Extract & Translate button
           SizedBox(
             width: double.infinity,
             child: ElevatedButton.icon(
-              onPressed: _isProcessing ? null : _extractFromVideo,
+              onPressed:
+                  (_isProcessing || !hasVideo) ? null : _extractFromVideo,
               icon: _isProcessing
                   ? const SizedBox(
                       width: 18,
@@ -1444,11 +1576,12 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
                       ),
                     )
                   : const Icon(Icons.play_circle_rounded, size: 18),
-              label: Text(_isProcessing ? _status : 'Extract & Translate'),
+              label: Text(_isProcessing
+                  ? (_status.isEmpty ? 'Processing...' : _status)
+                  : 'Extract & Translate'),
             ),
           ),
 
-          // Progress
           if (_isProcessing) ...[
             const SizedBox(height: AppSpacing.md),
             ClipRRect(
@@ -1461,16 +1594,8 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
                 minHeight: 6,
               ),
             ),
-            const SizedBox(height: AppSpacing.sm),
-            Text(
-              _status,
-              style: AppTypography.caption.copyWith(
-                color: AppColors.textMuted,
-              ),
-            ),
           ],
 
-          // Transcript result
           if (_transcript.isNotEmpty) ...[
             const SizedBox(height: AppSpacing.md),
             Container(
@@ -1500,12 +1625,17 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
                     ],
                   ),
                   const SizedBox(height: AppSpacing.sm),
-                  Text(
-                    _transcript,
-                    style: const TextStyle(
-                      fontSize: 14,
-                      height: 1.5,
-                      color: AppColors.textPrimary,
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 220),
+                    child: SingleChildScrollView(
+                      child: Text(
+                        _transcript,
+                        style: const TextStyle(
+                          fontSize: 14,
+                          height: 1.5,
+                          color: AppColors.textPrimary,
+                        ),
+                      ),
                     ),
                   ),
                   const SizedBox(height: AppSpacing.md),
@@ -1513,7 +1643,7 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
                     children: [
                       Expanded(
                         child: OutlinedButton.icon(
-                          onPressed: _translate,
+                          onPressed: _isProcessing ? null : _translate,
                           icon: const Icon(Icons.translate_rounded, size: 16),
                           label: const Text('Translate'),
                         ),
@@ -1532,95 +1662,17 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
             ),
           ],
 
-          // Translation result
           if (_showTranslation && _translation.isNotEmpty) ...[
             const SizedBox(height: AppSpacing.md),
-            Container(
-              padding: const EdgeInsets.all(AppSpacing.md),
-              decoration: BoxDecoration(
-                color: AppColors.primary.withValues(alpha: 0.04),
-                borderRadius: BorderRadius.circular(AppRadius.lg),
-                border: Border.all(
-                  color: AppColors.primary.withValues(alpha: 0.15),
-                ),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      const Icon(
-                        Icons.check_circle_rounded,
-                        color: AppColors.success,
-                        size: 16,
-                      ),
-                      const SizedBox(width: AppSpacing.sm),
-                      Text(
-                        'Translation (${_targetLanguage.name})',
-                        style: AppTypography.titleMedium,
-                      ),
-                      const Spacer(),
-                      IconButton(
-                        onPressed: () {
-                          Clipboard.setData(ClipboardData(text: _translation));
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('Translation copied'),
-                              backgroundColor: AppColors.success,
-                              behavior: SnackBarBehavior.floating,
-                              duration: Duration(seconds: 2),
-                            ),
-                          );
-                        },
-                        icon: const Icon(Icons.copy_rounded, size: 16),
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: AppSpacing.sm),
-                  Text(
-                    _translation,
-                    style: const TextStyle(
-                      fontSize: 16,
-                      height: 1.5,
-                      color: AppColors.textPrimary,
-                    ),
-                  ),
-                ],
-              ),
-            ),
+            _buildTranslationResult(),
           ],
 
           if (_error.isNotEmpty) ...[
             const SizedBox(height: AppSpacing.sm),
-            Container(
-              padding: const EdgeInsets.all(AppSpacing.sm),
-              decoration: BoxDecoration(
-                color: AppColors.error.withValues(alpha: 0.06),
-                borderRadius: BorderRadius.circular(AppRadius.md),
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.error_outline_rounded,
-                      color: AppColors.error, size: 16),
-                  const SizedBox(width: AppSpacing.sm),
-                  Expanded(
-                    child: Text(
-                      _error,
-                      style:
-                          const TextStyle(color: AppColors.error, fontSize: 13),
-                    ),
-                  ),
-                  GestureDetector(
-                    onTap: () => setState(() => _error = ''),
-                    child: const Icon(Icons.close_rounded,
-                        color: AppColors.error, size: 16),
-                  ),
-                ],
-              ),
-            ),
+            _buildErrorBox(),
           ],
+
+          const SizedBox(height: AppSpacing.md),
         ],
       ),
     );
@@ -1638,7 +1690,6 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
       ),
       child: Row(
         children: [
-          // Source language
           Expanded(
             child: GestureDetector(
               onTap: () => _showLanguageSelector(true),
@@ -1671,8 +1722,6 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
               ),
             ),
           ),
-
-          // Swap icon
           GestureDetector(
             onTap: () {
               setState(() {
@@ -1693,8 +1742,6 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
               ),
             ),
           ),
-
-          // Target language
           Expanded(
             child: GestureDetector(
               onTap: () => _showLanguageSelector(false),

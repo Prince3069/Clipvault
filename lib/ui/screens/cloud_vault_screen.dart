@@ -1,14 +1,13 @@
 // ui/screens/cloud_vault_screen.dart
 // Complete Cloud Vault UI with Tabs (Images/Videos), Upload, Download, Delete
 // Premium only - with subscription check
-// ignore_for_file: use_build_context_synchronously, avoid_print, no_leading_underscores_for_library_prefixes, unused_local_variable
+// ignore_for_file: use_build_context_synchronously, avoid_print
 
 import 'dart:io';
-// import 'package:all_social_downloader/services/cloud_vault_service.dart'
-//     as cloud_vault_service;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:image_picker/image_picker.dart' as _image_picker;
+import 'package:permission_handler/permission_handler.dart';
 import '../../providers/cloud_vault_provider.dart';
 import '../../providers/premium_provider.dart';
 import '../themes/app_theme.dart';
@@ -52,16 +51,43 @@ class _CloudVaultScreenState extends State<CloudVaultScreen>
     if (mounted) setState(() => _isLoading = false);
   }
 
+  /// Requests the media permissions image_picker needs on Android.
+  ///
+  /// image_picker on Android 13+ normally uses the system Photo Picker
+  /// (no permission required), but many OEM builds — Xiaomi/MIUI,
+  /// Realme, Tecno, Infinix, itel, older Samsung One UI — silently fall
+  /// back to ACTION_GET_CONTENT, which returns null when media read is
+  /// denied. That is the exact reason "the picker doesn't open" was
+  /// reported. Requesting the modern media permissions first, then the
+  /// legacy storage permission, covers every Android version.
+  Future<bool> _ensureMediaPermission({required bool forVideo}) async {
+    if (!Platform.isAndroid) return true; // iOS shows its own system prompt
+
+    try {
+      final modern = forVideo ? Permission.videos : Permission.photos;
+      if (await modern.isGranted) return true;
+      var s = await modern.request();
+      if (s.isGranted || s.isLimited) return true;
+
+      // Android 12 and below (and anything where the modern permission
+      // is a no-op) — legacy storage covers it.
+      if (await Permission.storage.isGranted) return true;
+      s = await Permission.storage.request();
+      return s.isGranted;
+    } catch (e) {
+      print('Permission check error: $e');
+      return true;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Consumer2<CloudVaultProvider, PremiumProvider>(
       builder: (_, cloudProvider, premium, __) {
-        // Check if user is premium
         if (!premium.isPremium) {
           return _buildPremiumWall();
         }
 
-        // Check grace period
         return FutureBuilder<bool>(
           future: cloudProvider.checkGracePeriod(),
           builder: (context, snapshot) {
@@ -204,7 +230,6 @@ class _CloudVaultScreenState extends State<CloudVaultScreen>
               const SizedBox(height: 12),
               TextButton(
                 onPressed: () {
-                  // User can still access files during grace period
                   Navigator.pop(context);
                 },
                 child: const Text('View Files (Read Only)'),
@@ -247,14 +272,9 @@ class _CloudVaultScreenState extends State<CloudVaultScreen>
       ),
       body: Column(
         children: [
-          // Quota bar
           _buildQuotaBar(provider),
-
-          // Status messages
           if (provider.isUploading || provider.isDownloading)
             _buildProgressBanner(provider),
-
-          // Tab content
           Expanded(
             child: TabBarView(
               controller: _tabController,
@@ -469,10 +489,7 @@ class _CloudVaultScreenState extends State<CloudVaultScreen>
         child: Stack(
           fit: StackFit.expand,
           children: [
-            // Thumbnail
             _buildThumbnail(file, isVideo),
-
-            // Gradient overlay
             Positioned(
               bottom: 0,
               left: 0,
@@ -491,8 +508,6 @@ class _CloudVaultScreenState extends State<CloudVaultScreen>
                 ),
               ),
             ),
-
-            // File info
             Positioned(
               bottom: 4,
               left: 4,
@@ -520,8 +535,6 @@ class _CloudVaultScreenState extends State<CloudVaultScreen>
                 ],
               ),
             ),
-
-            // Source badge
             Positioned(
               top: 4,
               left: 4,
@@ -541,8 +554,6 @@ class _CloudVaultScreenState extends State<CloudVaultScreen>
                 ),
               ),
             ),
-
-            // 3-dot menu
             Positioned(
               top: 4,
               right: 4,
@@ -596,10 +607,6 @@ class _CloudVaultScreenState extends State<CloudVaultScreen>
   }
 
   void _openFile(CloudFile file) async {
-    // For now, open in a simple viewer
-    // We need to download first or stream directly
-    // Let's stream directly from Firebase Storage
-
     final mediaFile = MediaFile(
       id: file.id,
       path: file.storagePath,
@@ -610,10 +617,8 @@ class _CloudVaultScreenState extends State<CloudVaultScreen>
       createdAt: file.uploadDate,
       viewedAt: DateTime.now(),
       isDownloaded: false,
-      // We'll need to handle streaming for cloud files
     );
 
-    // Show loading indicator while getting URL
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -623,14 +628,12 @@ class _CloudVaultScreenState extends State<CloudVaultScreen>
     );
 
     try {
-      // Get download URL for streaming
       final provider = Provider.of<CloudVaultProvider>(context, listen: false);
       final result = await provider.downloadFile(file);
 
-      Navigator.pop(context); // Close loading dialog
+      Navigator.pop(context);
 
       if (result != null) {
-        // Now open the media viewer with the downloaded file
         final downloadedFile = MediaFile(
           id: file.id,
           path: result,
@@ -903,8 +906,16 @@ class _CloudVaultScreenState extends State<CloudVaultScreen>
   Future<void> _pickAndUpload(
       CloudVaultProvider provider, ImageSource source) async {
     try {
-      // Use pickImage (supports camera/gallery) since pickMedia doesn't
-      // define a 'source' named parameter in some image_picker versions.
+      // Only the gallery source needs media read permission; the camera
+      // source uses its own CAMERA intent permission (handled by the OS).
+      if (source == ImageSource.gallery) {
+        final ok = await _ensureMediaPermission(forVideo: false);
+        if (!ok) {
+          _showPermissionSnackbar(forVideo: false);
+          return;
+        }
+      }
+
       final XFile? picked = await _picker.pickImage(
         source: source,
         maxWidth: 1920,
@@ -912,22 +923,26 @@ class _CloudVaultScreenState extends State<CloudVaultScreen>
         imageQuality: 85,
       );
 
-      if (picked == null) return;
+      if (!mounted) return;
+      if (picked == null) {
+        // Either cancelled or silently failed — tell the user what to
+        // check rather than nothing at all.
+        _showPickerFailedHint(forVideo: false);
+        return;
+      }
 
       final file = File(picked.path);
       final fileName = picked.name;
-
-      // Determine if video
-      final isVideo = picked.mimeType?.startsWith('video') ?? false;
 
       final success = await provider.uploadFile(
         localPath: file.path,
         fileName: fileName,
         source: 'manual',
-        mimeType: picked.mimeType,
+        mimeType: picked.mimeType ?? 'image/jpeg',
       );
 
-      if (success && mounted) {
+      if (!mounted) return;
+      if (success) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('✅ Uploaded to cloud successfully!'),
@@ -935,7 +950,7 @@ class _CloudVaultScreenState extends State<CloudVaultScreen>
           ),
         );
         provider.refreshQuota();
-      } else if (mounted) {
+      } else {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content:
@@ -960,11 +975,24 @@ class _CloudVaultScreenState extends State<CloudVaultScreen>
   Future<void> _pickVideoAndUpload(
       CloudVaultProvider provider, ImageSource source) async {
     try {
+      if (source == ImageSource.gallery) {
+        final ok = await _ensureMediaPermission(forVideo: true);
+        if (!ok) {
+          _showPermissionSnackbar(forVideo: true);
+          return;
+        }
+      }
+
       final XFile? picked = await _picker.pickVideo(
         source: source,
         maxDuration: const Duration(minutes: 10),
       );
-      if (picked == null) return;
+
+      if (!mounted) return;
+      if (picked == null) {
+        _showPickerFailedHint(forVideo: true);
+        return;
+      }
 
       final success = await provider.uploadFile(
         localPath: picked.path,
@@ -984,6 +1012,7 @@ class _CloudVaultScreenState extends State<CloudVaultScreen>
       );
       if (success) await provider.refreshQuota();
     } catch (e) {
+      print('Pick video error: $e');
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -993,11 +1022,46 @@ class _CloudVaultScreenState extends State<CloudVaultScreen>
       );
     }
   }
+
+  void _showPermissionSnackbar({required bool forVideo}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          forVideo
+              ? 'Video access is required. Enable it in Settings → Apps '
+                  '→ MediaNest → Permissions.'
+              : 'Photo access is required. Enable it in Settings → Apps '
+                  '→ MediaNest → Permissions.',
+        ),
+        backgroundColor: AppColors.error,
+        duration: const Duration(seconds: 5),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
+  void _showPickerFailedHint({required bool forVideo}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          forVideo
+              ? 'No video selected. If the picker didn\'t open, check '
+                  'that MediaNest has permission to access videos.'
+              : 'No image selected. If the picker didn\'t open, check '
+                  'that MediaNest has permission to access photos.',
+        ),
+        backgroundColor: AppColors.warning,
+        duration: const Duration(seconds: 4),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
 }
 
 // ─── CachedNetworkImage placeholder ──────────────────────────────────────────
-// For simplicity, we'll use a simple Image.network with error handling
-// In production, use cached_network_image package
+// Simple Image.network wrapper — production would use cached_network_image.
 
 class CachedNetworkImage extends StatefulWidget {
   final String imageUrl;
@@ -1032,11 +1096,12 @@ class _CachedNetworkImageState extends State<CachedNetworkImage> {
       await NetworkImage(widget.imageUrl).resolve(const ImageConfiguration());
       if (mounted) setState(() => _loading = false);
     } catch (_) {
-      if (mounted)
+      if (mounted) {
         setState(() {
           _loading = false;
           _error = true;
         });
+      }
     }
   }
 
