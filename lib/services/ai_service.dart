@@ -201,6 +201,68 @@ class AIService {
     }
   }
 
+  /// Reads the Coach profile (streak, points, niche, goal, name) from the
+  /// server. Cheap, free, and safe to call on every Coach screen open —
+  /// this is what keeps the streak counter on the Coach screen in step
+  /// with what the server actually recorded, instead of the old
+  /// SharedPreferences counter that drifted out of sync every time a
+  /// challenge was completed on a different device.
+  Future<Map<String, dynamic>> getCoachProfile() async {
+    try {
+      final token = await _getIdToken();
+      final response = await http.get(
+        Uri.parse('$_baseUrl/getCoachProfile'),
+        headers: {'Authorization': 'Bearer $token'},
+      );
+      if (response.statusCode != 200) {
+        debugPrint('getCoachProfile failed: ${response.body}');
+        return {
+          'streak': 0,
+          'points': 0,
+          'niche': null,
+          'goal': null,
+          'name': null
+        };
+      }
+      return jsonDecode(response.body) as Map<String, dynamic>;
+    } catch (e) {
+      debugPrint('getCoachProfile error: $e');
+      return {
+        'streak': 0,
+        'points': 0,
+        'niche': null,
+        'goal': null,
+        'name': null
+      };
+    }
+  }
+
+  /// Writes the Coach profile (niche, goal, name) to Firestore, so
+  /// /getDailyChallenge can generate challenges that actually match the
+  /// person's niche. Local SharedPreferences is still written by the
+  /// caller for offline display — this is the copy the server reads.
+  Future<bool> saveCoachProfile({
+    required String niche,
+    required String goal,
+    required String name,
+  }) async {
+    try {
+      final token = await _getIdToken();
+      final response = await http.post(
+        Uri.parse('$_baseUrl/saveCoachProfile'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $token',
+        },
+        body: jsonEncode({'niche': niche, 'goal': goal, 'name': name}),
+      );
+      return response.statusCode == 200;
+    } catch (e) {
+      debugPrint('saveCoachProfile error: $e');
+      return false;
+    }
+  }
+
   /// Largest video the backend will analyze — keep in step with
   /// MAX_VIDEO_BYTES in functions/lib/videoAnalysis.js and the size cap in
   /// storage.rules (all three are 24MB).
@@ -218,12 +280,22 @@ class AIService {
   Future<String?> analyzeVideoFile(String localPath) async {
     try {
       final file = File(localPath);
-      if (!await file.exists()) return null;
+      if (!await file.exists()) {
+        debugPrint('analyzeVideoFile: file not found at $localPath');
+        return null;
+      }
       final size = await file.length();
-      if (size == 0 || size > _maxAnalysisBytes) return null;
+      if (size == 0 || size > _maxAnalysisBytes) {
+        debugPrint(
+            'analyzeVideoFile: size $size outside bounds (max $_maxAnalysisBytes)');
+        return null;
+      }
 
       final uid = FirebaseAuth.instance.currentUser?.uid;
-      if (uid == null) return null;
+      if (uid == null) {
+        debugPrint('analyzeVideoFile: no signed-in user');
+        return null;
+      }
 
       final storagePath =
           'users/$uid/analysis_temp/${DateTime.now().millisecondsSinceEpoch}.mp4';
@@ -246,7 +318,9 @@ class AIService {
         return null;
       }
       final data = jsonDecode(response.body) as Map<String, dynamic>;
-      return data['analysisKey'] as String?;
+      final key = data['analysisKey'] as String?;
+      debugPrint('analyzeVideoFile: success, key=$key');
+      return key;
     } catch (e) {
       debugPrint('analyzeVideoFile error: $e');
       return null;
@@ -436,7 +510,16 @@ class AIService {
   // PREMIUM & CREDITS
   // ──────────────────────────────────────────────────────────────────────────
 
-  /// Get user's AI credits
+  /// Get user's AI credits.
+  ///
+  /// The error fallback deliberately returns remainingCredits: null — NOT 0.
+  /// The old fallback returned {'credits': 0, 'isPremium': false}, which no
+  /// caller ever actually read (there is no 'credits' key in the real
+  /// /getAICredits response shape), and every caller that did `credits[
+  /// 'remainingCredits'] as int? ?? 0` silently turned a failed request into
+  /// "0 credits" — which the Repurpose Studio UI then displayed as if the
+  /// person genuinely had none, even when they were Pro. null means
+  /// "unknown", and the UI can hide the badge instead of lying with "0".
   Future<Map<String, dynamic>> getAICredits() async {
     try {
       final token = await _getIdToken();
@@ -455,7 +538,7 @@ class AIService {
       return jsonDecode(response.body);
     } catch (e) {
       debugPrint('Get AI credits error: $e');
-      return {'credits': 0, 'isPremium': false};
+      return {'isPremium': false, 'remainingCredits': null};
     }
   }
 
