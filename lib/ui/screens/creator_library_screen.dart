@@ -1,20 +1,26 @@
 // ui/screens/creator_library_screen.dart
 // COMPLETE - Premium Visual Library with Pinterest-style Grid
-// Features: Smart filters, AI organization, visual browsing, search
+//
+// PERFORMANCE FIX: the screen used to always call refreshAllMedia() on
+// initState, which re-scans WhatsApp status folders AND MediaStore on
+// every mount. When opened via the Home card's Navigator.push that meant
+// a full re-scan every time — noticeably slower than the bottom-nav tab,
+// which just switches the visible index on an already-built screen.
+//
+// This version loads from the already-populated MediaProvider instantly
+// when there's a cache, and refreshes silently in the background so the
+// content stays current without blocking first paint.
 
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:video_thumbnail/video_thumbnail.dart';
 import '../../models/media_file.dart';
 import '../../providers/media_provider.dart';
-import '../../providers/download_provider.dart';
 import '../../providers/premium_provider.dart';
 import '../../services/ai_service.dart';
 import '../themes/app_theme.dart';
 import '../widgets/media_viewer_screen.dart';
-import 'cloud_vault_screen.dart';
 import 'premium_screen.dart';
 
 class CreatorLibraryScreen extends StatefulWidget {
@@ -49,22 +55,6 @@ class _CreatorLibraryScreenState extends State<CreatorLibraryScreen>
     'Favorites',
   ];
 
-  final List<String> _categoryOptions = [
-    'All',
-    'Comedy',
-    'Tutorial',
-    'Music',
-    'Fitness',
-    'Gaming',
-    'Cooking',
-    'Education',
-    'Travel',
-    'Technology',
-    'Fashion',
-    'Business',
-    'Sports',
-  ];
-
   final Map<String, IconData> _categoryIcons = {
     'All': Icons.apps_rounded,
     'Comedy': Icons.emoji_emotions_rounded,
@@ -96,40 +86,78 @@ class _CreatorLibraryScreenState extends State<CreatorLibraryScreen>
   }
 
   Future<void> _loadData() async {
+    final mediaProvider = Provider.of<MediaProvider>(context, listen: false);
+
+    final hasCached = mediaProvider.allMedia.isNotEmpty ||
+        mediaProvider.whatsappImages.isNotEmpty ||
+        mediaProvider.whatsappVideos.isNotEmpty;
+
+    if (hasCached) {
+      // FAST PATH: render from what's already in memory, immediately.
+      // Kick off a background refresh that updates silently when done —
+      // opening the screen from the Home card now feels the same as
+      // tapping the bottom-nav tab (both render in one frame).
+      _rebuildFromProvider(mediaProvider);
+
+      // Don't await — the UI is already painted.
+      mediaProvider.refreshAllMedia().then((_) {
+        if (!mounted) return;
+        _rebuildFromProvider(mediaProvider);
+        _enrichWithAI();
+      });
+      return;
+    }
+
+    // SLOW PATH: cold start — nothing cached. Do a blocking load.
     if (mounted) setState(() => _isLoading = true);
-
     try {
-      final mediaProvider = Provider.of<MediaProvider>(context, listen: false);
       await mediaProvider.refreshAllMedia();
-
-      final localMedia = [
-        ...mediaProvider.allMedia,
-        ...mediaProvider.whatsappImages,
-        ...mediaProvider.whatsappVideos,
-      ];
-      _libraryStats = _buildLocalStats(localMedia);
-      _collectionSuggestions = _buildLocalCollections(localMedia);
-
-      final premium = Provider.of<PremiumProvider>(context, listen: false);
-      if (premium.isPremium) {
-        try {
-          final remoteStats = await _ai.getLibraryStats();
-          final remoteSuggestions = await _ai.getCollectionSuggestions();
-          if (remoteStats.isNotEmpty)
-            _libraryStats = {..._libraryStats, ...remoteStats};
-          if (remoteSuggestions.isNotEmpty) {
-            _collectionSuggestions = remoteSuggestions;
-          }
-        } catch (e) {
-          debugPrint('AI library enrichment unavailable: $e');
-        }
-      }
-
-      _applyFilters();
+      if (!mounted) return;
+      _rebuildFromProvider(mediaProvider);
+      await _enrichWithAI();
     } catch (e) {
       debugPrint('Load library error: $e');
     } finally {
       if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  void _rebuildFromProvider(MediaProvider mediaProvider) {
+    final localMedia = [
+      ...mediaProvider.allMedia,
+      ...mediaProvider.whatsappImages,
+      ...mediaProvider.whatsappVideos,
+    ];
+    final stats = _buildLocalStats(localMedia);
+    final suggestions = _buildLocalCollections(localMedia);
+    final filtered = _applyFiltersToList(localMedia);
+
+    if (!mounted) return;
+    setState(() {
+      _libraryStats = stats;
+      _collectionSuggestions = suggestions;
+      _filteredMedia = filtered;
+      _isLoading = false;
+    });
+  }
+
+  /// Non-blocking AI enrichment — only runs for premium, and never
+  /// blocks the UI. Results just quietly replace the local stats when
+  /// they arrive.
+  Future<void> _enrichWithAI() async {
+    try {
+      final premium = Provider.of<PremiumProvider>(context, listen: false);
+      if (!premium.isPremium) return;
+
+      final remoteStats = await _ai.getLibraryStats();
+      if (!mounted) return;
+      if (remoteStats.isNotEmpty && remoteStats['categories'] != null) {
+        setState(() {
+          _libraryStats = {..._libraryStats, ...remoteStats};
+        });
+      }
+    } catch (e) {
+      debugPrint('AI library enrichment unavailable: $e');
     }
   }
 
@@ -148,7 +176,9 @@ class _CreatorLibraryScreenState extends State<CreatorLibraryScreen>
           .split(RegExp(r'\s+'))
           .where((word) => word.length > 2)
           .toSet();
-      for (final word in words) keywords[word] = (keywords[word] ?? 0) + 1;
+      for (final word in words) {
+        keywords[word] = (keywords[word] ?? 0) + 1;
+      }
     }
     final sortedKeywords = Map<String, int>.fromEntries(
       keywords.entries.toList()..sort((a, b) => b.value.compareTo(a.value)),
@@ -179,17 +209,11 @@ class _CreatorLibraryScreenState extends State<CreatorLibraryScreen>
         .toList();
   }
 
-  void _applyFilters() {
-    final mediaProvider = Provider.of<MediaProvider>(context, listen: false);
-    final allMedia = [
-      ...mediaProvider.allMedia,
-      ...mediaProvider.whatsappImages,
-      ...mediaProvider.whatsappVideos,
-    ];
+  /// Pure filter — returns a new list based on the current search / filter
+  /// state. Callers are responsible for putting the result into the state.
+  List<MediaFile> _applyFiltersToList(List<MediaFile> source) {
+    var filtered = List<MediaFile>.from(source);
 
-    var filtered = List<MediaFile>.from(allMedia);
-
-    // Search filter
     if (_searchController.text.isNotEmpty) {
       final query = _searchController.text.toLowerCase();
       filtered = filtered
@@ -199,7 +223,6 @@ class _CreatorLibraryScreenState extends State<CreatorLibraryScreen>
           .toList();
     }
 
-    // Platform filter
     if (_selectedPlatform != 'All') {
       filtered = filtered
           .where((m) =>
@@ -207,7 +230,6 @@ class _CreatorLibraryScreenState extends State<CreatorLibraryScreen>
           .toList();
     }
 
-    // Category filter from local media type, source labels, or AI metadata.
     if (_selectedCategory != 'All') {
       final category = _selectedCategory.toLowerCase();
       filtered = filtered.where((m) {
@@ -218,7 +240,6 @@ class _CreatorLibraryScreenState extends State<CreatorLibraryScreen>
       }).toList();
     }
 
-    // Time filter
     final now = DateTime.now();
     switch (_selectedFilter) {
       case 'Today':
@@ -242,6 +263,18 @@ class _CreatorLibraryScreenState extends State<CreatorLibraryScreen>
         break;
     }
 
+    return filtered;
+  }
+
+  void _applyFilters() {
+    final mediaProvider = Provider.of<MediaProvider>(context, listen: false);
+    final allMedia = [
+      ...mediaProvider.allMedia,
+      ...mediaProvider.whatsappImages,
+      ...mediaProvider.whatsappVideos,
+    ];
+    final filtered = _applyFiltersToList(allMedia);
+    if (!mounted) return;
     setState(() => _filteredMedia = filtered);
   }
 
@@ -254,30 +287,16 @@ class _CreatorLibraryScreenState extends State<CreatorLibraryScreen>
       body: SafeArea(
         child: Column(
           children: [
-            // ─── Header ──────────────────────────────────────────────────────
             _buildHeader(isPremium),
-
-            // ─── Search Bar ──────────────────────────────────────────────────
             _buildSearchBar(),
-
-            // ─── Filter Chips ────────────────────────────────────────────────
             _buildFilterChips(),
-
-            // ─── Tab Bar ─────────────────────────────────────────────────────
             _buildTabBar(),
-
-            // ─── Content ────────────────────────────────────────────────────
             Expanded(
               child: TabBarView(
                 controller: _tabController,
                 children: [
-                  // Tab 1: Grid
                   _buildGrid(),
-
-                  // Tab 2: Collections
                   _buildCollectionsTab(),
-
-                  // Tab 3: AI Insights (Premium)
                   _buildInsightsTab(),
                 ],
               ),
@@ -325,7 +344,6 @@ class _CreatorLibraryScreenState extends State<CreatorLibraryScreen>
               ],
             ),
           ),
-          // Selection mode toggle
           GestureDetector(
             onTap: () {
               setState(() {
@@ -352,7 +370,6 @@ class _CreatorLibraryScreenState extends State<CreatorLibraryScreen>
             ),
           ),
           const SizedBox(width: AppSpacing.sm),
-          // Refresh button
           GestureDetector(
             onTap: _loadData,
             child: Container(
@@ -373,8 +390,6 @@ class _CreatorLibraryScreenState extends State<CreatorLibraryScreen>
       ),
     );
   }
-
-  // ─── Search Bar ──────────────────────────────────────────────────────────
 
   Widget _buildSearchBar() {
     return Padding(
@@ -448,8 +463,6 @@ class _CreatorLibraryScreenState extends State<CreatorLibraryScreen>
     );
   }
 
-  // ─── Filter Chips ────────────────────────────────────────────────────────
-
   Widget _buildFilterChips() {
     if (!_showFilters) return const SizedBox.shrink();
 
@@ -460,7 +473,6 @@ class _CreatorLibraryScreenState extends State<CreatorLibraryScreen>
       ),
       child: Column(
         children: [
-          // Time filters
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,
             child: Row(
@@ -474,8 +486,8 @@ class _CreatorLibraryScreenState extends State<CreatorLibraryScreen>
                     onSelected: (selected) {
                       setState(() {
                         _selectedFilter = selected ? filter : 'All';
-                        _applyFilters();
                       });
+                      _applyFilters();
                     },
                     backgroundColor: AppColors.surface,
                     selectedColor: AppColors.primary.withValues(alpha: 0.12),
@@ -500,7 +512,6 @@ class _CreatorLibraryScreenState extends State<CreatorLibraryScreen>
             ),
           ),
           const SizedBox(height: AppSpacing.sm),
-          // Platform filters
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,
             child: Row(
@@ -542,8 +553,8 @@ class _CreatorLibraryScreenState extends State<CreatorLibraryScreen>
         onSelected: (selected) {
           setState(() {
             _selectedPlatform = selected ? label : 'All';
-            _applyFilters();
           });
+          _applyFilters();
         },
         backgroundColor: AppColors.surface,
         selectedColor: color,
@@ -561,8 +572,6 @@ class _CreatorLibraryScreenState extends State<CreatorLibraryScreen>
       ),
     );
   }
-
-  // ─── Tab Bar ─────────────────────────────────────────────────────────────
 
   Widget _buildTabBar() {
     return Container(
@@ -595,10 +604,8 @@ class _CreatorLibraryScreenState extends State<CreatorLibraryScreen>
     );
   }
 
-  // ─── Grid Tab ────────────────────────────────────────────────────────────
-
   Widget _buildGrid() {
-    if (_isLoading) {
+    if (_isLoading && _filteredMedia.isEmpty) {
       return const Center(
         child: CircularProgressIndicator(
           color: AppColors.primary,
@@ -713,8 +720,6 @@ class _CreatorLibraryScreenState extends State<CreatorLibraryScreen>
     );
   }
 
-  // ─── Collections Tab ─────────────────────────────────────────────────────
-
   Widget _buildCollectionsTab() {
     final suggestions = _collectionSuggestions;
     final total = (_libraryStats['total'] as int?) ?? 0;
@@ -796,7 +801,7 @@ class _CreatorLibraryScreenState extends State<CreatorLibraryScreen>
               icon: _getPlatformIcon(name.toLowerCase()),
               color: color,
               onTap: () {
-                _selectedCategory = name;
+                setState(() => _selectedCategory = name);
                 _applyFilters();
                 _tabController.animateTo(0);
                 ScaffoldMessenger.of(context).showSnackBar(
@@ -816,10 +821,8 @@ class _CreatorLibraryScreenState extends State<CreatorLibraryScreen>
     return parsed == null ? AppColors.primary : Color(parsed);
   }
 
-  // ─── Insights Tab ─────────────────────────────────────────────────────────
-
   Widget _buildInsightsTab() {
-    if (_isLoading) {
+    if (_isLoading && _libraryStats.isEmpty) {
       return const Center(
         child:
             CircularProgressIndicator(color: AppColors.primary, strokeWidth: 2),
@@ -869,7 +872,7 @@ class _CreatorLibraryScreenState extends State<CreatorLibraryScreen>
       return InkWell(
         borderRadius: BorderRadius.circular(AppRadius.md),
         onTap: () {
-          _selectedPlatform = name;
+          setState(() => _selectedPlatform = name);
           _applyFilters();
           _tabController.animateTo(0);
         },
@@ -1047,8 +1050,6 @@ class _CreatorLibraryScreenState extends State<CreatorLibraryScreen>
     );
   }
 
-  // ─── Helper Widgets ──────────────────────────────────────────────────────
-
   Widget _buildEmptyState() {
     return Center(
       child: Padding(
@@ -1056,7 +1057,7 @@ class _CreatorLibraryScreenState extends State<CreatorLibraryScreen>
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(
+            const Icon(
               Icons.folder_open_rounded,
               size: 64,
               color: AppColors.textMuted,
@@ -1094,7 +1095,7 @@ class _CreatorLibraryScreenState extends State<CreatorLibraryScreen>
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(
+            const Icon(
               Icons.collections_bookmark_rounded,
               size: 64,
               color: AppColors.textMuted,
@@ -1120,67 +1121,6 @@ class _CreatorLibraryScreenState extends State<CreatorLibraryScreen>
           ],
         ),
       ),
-    );
-  }
-
-  Widget _buildPremiumLocked() {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(AppSpacing.xl),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              Icons.workspace_premium_rounded,
-              size: 64,
-              color: AppColors.primary.withValues(alpha: 0.3),
-            ),
-            const SizedBox(height: AppSpacing.md),
-            const Text(
-              'AI Insights',
-              style: AppTypography.headlineMedium,
-            ),
-            const SizedBox(height: AppSpacing.sm),
-            Text(
-              'Unlock AI-powered insights about your content library',
-              style: AppTypography.bodyMedium.copyWith(
-                color: AppColors.textMuted,
-              ),
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: AppSpacing.lg),
-            ElevatedButton.icon(
-              onPressed: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (_) => const PremiumScreen()),
-                );
-              },
-              icon: const Icon(Icons.workspace_premium_rounded),
-              label: const Text('Upgrade to Pro'),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _StatColumn(String label, String value) {
-    return Column(
-      children: [
-        Text(
-          value,
-          style: AppTypography.headlineMedium.copyWith(
-            fontWeight: FontWeight.w800,
-          ),
-        ),
-        Text(
-          label,
-          style: AppTypography.caption.copyWith(
-            color: AppColors.textMuted,
-          ),
-        ),
-      ],
     );
   }
 
@@ -1215,57 +1155,11 @@ class _CreatorLibraryScreenState extends State<CreatorLibraryScreen>
         return AppColors.twitter;
       case 'WhatsApp':
         return AppColors.whatsapp;
-
       default:
         return AppColors.primary;
     }
   }
 
-  IconData _getCategoryIcon(String category) {
-    return _categoryIcons[category] ?? Icons.folder_rounded;
-  }
-
-  Color _getCategoryColor(String category) {
-    final colors = {
-      'Comedy': const Color(0xFFF59E0B),
-      'Tutorial': const Color(0xFF3B82F6),
-      'Music': const Color(0xFF8B5CF6),
-      'Fitness': const Color(0xFF22C55E),
-      'Gaming': const Color(0xFFEF4444),
-      'Cooking': const Color(0xFFF97316),
-      'Education': const Color(0xFF6366F1),
-      'Travel': const Color(0xFF06B6D4),
-      'Technology': const Color(0xFF0EA5E9),
-      'Fashion': const Color(0xFFD946EF),
-      'Business': const Color(0xFF1E293B),
-      'Sports': const Color(0xFFF59E0B),
-    };
-    return colors[category] ?? AppColors.primary;
-  }
-
-  Color _getMoodColor(String mood) {
-    switch (mood) {
-      case 'Funny':
-        return const Color(0xFFF59E0B);
-      case 'Inspiring':
-        return const Color(0xFF22C55E);
-      case 'Educational':
-        return const Color(0xFF3B82F6);
-      case 'Relaxing':
-        return const Color(0xFF06B6D4);
-      case 'Energetic':
-        return const Color(0xFFEF4444);
-      case 'Motivational':
-        return const Color(0xFF8B5CF6);
-      case 'Calm':
-        return const Color(0xFF22C55E);
-      default:
-        return AppColors.primary;
-    }
-  }
-
-  /// Icon resolver for Collections. This method must be inside the state class
-  /// because the Collections tab calls it directly.
   IconData _getPlatformIcon(String platform) {
     final key =
         platform.trim().toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
@@ -1305,10 +1199,7 @@ class _GridItem extends StatelessWidget {
         child: Stack(
           fit: StackFit.expand,
           children: [
-            // Thumbnail
             _buildThumbnail(),
-
-            // Gradient overlay
             Positioned(
               bottom: 0,
               left: 0,
@@ -1327,8 +1218,6 @@ class _GridItem extends StatelessWidget {
                 ),
               ),
             ),
-
-            // Info
             Positioned(
               bottom: 4,
               left: 4,
@@ -1356,8 +1245,6 @@ class _GridItem extends StatelessWidget {
                 ],
               ),
             ),
-
-            // Platform badge
             Positioned(
               top: 4,
               left: 4,
@@ -1374,7 +1261,7 @@ class _GridItem extends StatelessWidget {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Icon(
-                      _getPlatformIcon(mediaFile.sourceApp),
+                      _platformIcon(mediaFile.sourceApp),
                       color: Colors.white70,
                       size: 8,
                     ),
@@ -1429,10 +1316,7 @@ class _GridItem extends StatelessWidget {
     );
   }
 
-  /// Returns the icon used for a platform label in Collections and Grid cards.
-  /// The helper intentionally lives inside _CreatorLibraryScreenState because
-  /// both call sites are state-owned widgets in this screen.
-  IconData _getPlatformIcon(String platform) {
+  IconData _platformIcon(String platform) {
     final key =
         platform.trim().toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
     if (key.contains('instagram')) return Icons.camera_alt_rounded;
@@ -1451,8 +1335,6 @@ class _GridItem extends StatelessWidget {
 }
 
 // ─── Video thumbnail widget ──────────────────────────────────────────────────
-// Generates and caches an actual preview frame for video items, the same
-// approach saved_screen.dart uses, instead of a static play-icon block.
 
 class _LibraryVideoThumb extends StatefulWidget {
   final String filePath;
@@ -1626,53 +1508,6 @@ class _CollectionCard extends StatelessWidget {
           ],
         ),
       ),
-    );
-  }
-}
-
-// ─── Mood Item Widget ──────────────────────────────────────────────────────
-
-class _MoodItem extends StatelessWidget {
-  final String label;
-  final int percentage;
-  final Color color;
-
-  const _MoodItem({
-    required this.label,
-    required this.percentage,
-    required this.color,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      children: [
-        Container(
-          width: 40,
-          height: 40,
-          decoration: BoxDecoration(
-            color: color.withValues(alpha: 0.12),
-            shape: BoxShape.circle,
-          ),
-          child: Center(
-            child: Text(
-              '$percentage%',
-              style: TextStyle(
-                color: color,
-                fontSize: 12,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-          ),
-        ),
-        const SizedBox(height: 4),
-        Text(
-          label,
-          style: AppTypography.caption.copyWith(
-            color: AppColors.textSecondary,
-          ),
-        ),
-      ],
     );
   }
 }
