@@ -24,6 +24,26 @@ async function requireAuth(req, res, next) {
 }
 
 /**
+ * Owner/producer accounts: always treated as Pro so the people who ship
+ * the app can test every Pro feature in the production build. The email
+ * must be VERIFIED (Google sign-in always is) — otherwise anyone could
+ * register an unverified email/password account with one of these
+ * addresses and get Pro for free.
+ */
+const OWNER_EMAILS = [
+  "princenwanozie6666@gmail.com",
+  "ifeanyinwanozie6666@gmail.com",
+];
+const OWNER_GRANT_MS = 10 * 365 * 24 * 60 * 60 * 1000;
+const OWNER_RENEW_BELOW_MS = 365 * 24 * 60 * 60 * 1000;
+
+function isOwnerToken(user) {
+  if (!user || typeof user.email !== "string") return false;
+  if (user.email_verified !== true) return false;
+  return OWNER_EMAILS.includes(user.email.trim().toLowerCase());
+}
+
+/**
  * Reads the SAME field PremiumProvider.grantPremium() writes via
  * CloudVaultService.updatePremiumExpiry() — users/{uid}.premiumExpiry — so
  * this is guaranteed to agree with what the app itself considers premium.
@@ -44,16 +64,39 @@ async function requireAuth(req, res, next) {
 async function attachPremiumStatus(req, res, next) {
   try {
     const db = admin.firestore();
-    const doc = await db.collection("users").doc(req.user.uid).get();
+    const userRef = db.collection("users").doc(req.user.uid);
+    const doc = await userRef.get();
     const data = doc.data() || {};
     const expiry = data.premiumExpiry;
     req.isPremium = !!(expiry && expiry.toDate().getTime() > Date.now());
+    req.isOwner = isOwnerToken(req.user);
+
+    if (req.isOwner) {
+      // Owner/producer accounts are always Pro. Writing a far-future
+      // premiumExpiry (instead of only flipping req.isPremium) keeps every
+      // other reader of that field in agreement: budget.js, the Cloud
+      // Vault client code and the Storage/Firestore security rules.
+      const msLeft = expiry ? expiry.toDate().getTime() - Date.now() : 0;
+      if (data.ownerAccess !== true || msLeft < OWNER_RENEW_BELOW_MS) {
+        await userRef.set({
+          ownerAccess: true,
+          premiumExpiry: admin.firestore.Timestamp.fromMillis(Date.now() + OWNER_GRANT_MS),
+          planId: data.planId === "monthly" || data.planId === "annual" ? data.planId : "annual",
+        }, {merge: true});
+      }
+      req.isPremium = true;
+    } else if (data.ownerAccess === true) {
+      // The flag is only ever valid for the allow-listed emails.
+      await userRef.set({ownerAccess: false}, {merge: true});
+    }
+
     const tz = typeof data.timezone === "string" ? data.timezone : "";
     req.userTimezone = tz || "UTC";
     next();
   } catch (e) {
     console.error("Premium status check failed:", e.message);
-    req.isPremium = false;
+    req.isOwner = isOwnerToken(req.user);
+    req.isPremium = req.isOwner;
     req.userTimezone = "UTC";
     next();
   }
@@ -200,6 +243,8 @@ async function checkBrandingAllowance(uid, isPremium, tz = "UTC") {
 }
 
 module.exports = {
+  OWNER_EMAILS,
+  isOwnerToken,
   requireAuth,
   attachPremiumStatus,
   requirePremium,

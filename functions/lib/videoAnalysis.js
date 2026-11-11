@@ -26,6 +26,8 @@ const WHISPER_PRICE_PER_MINUTE_USD = 0.006;
 const MAX_ANALYSIS_MINUTES = 10;
 // A hair under Whisper's own 25MB request ceiling.
 const MAX_VIDEO_BYTES = 24 * 1024 * 1024;
+// Keeps the cached Firestore document comfortably under the 1MB limit.
+const MAX_SEGMENTS = 600;
 
 /**
  * Reads the duration (seconds) from an MP4/MOV/3GP/M4A container's 'mvhd'
@@ -52,9 +54,9 @@ function readMp4DurationSeconds(buf) {
 
 /**
  * Transcribes video bytes with Whisper.
- * @returns {Promise<{transcript: string, durationMinutes: number}>}
+ * @returns {Promise<{transcript: string, segments: {start:number,end:number,text:string}[], language: string|null, durationMinutes: number}>}
  */
-async function transcribeVideoBytes(apiKey, buffer) {
+async function transcribeVideoBytes(apiKey, buffer, fileName = "video.mp4") {
   if (buffer.length > MAX_VIDEO_BYTES) {
     throw Object.assign(new Error("Video is too large to analyze (24MB limit)"), {httpStatus: 413});
   }
@@ -71,7 +73,7 @@ async function transcribeVideoBytes(apiKey, buffer) {
   }
 
   const form = new FormData();
-  form.append("file", new Blob([buffer]), "video.mp4");
+  form.append("file", new Blob([buffer]), fileName);
   form.append("model", "whisper-1");
   form.append("response_format", "verbose_json");
 
@@ -89,7 +91,22 @@ async function transcribeVideoBytes(apiKey, buffer) {
   // Bill on the LARGER of the two durations — never undercharge your own
   // cost if the container header and Whisper disagree slightly.
   const billedSeconds = Math.max(data.duration || 0, parsedSeconds);
-  return {transcript: data.text || "", durationMinutes: billedSeconds / 60};
+  // Real timed segments — what Repurpose Studio's Subtitles tool and the
+  // translator's SRT export are built from, so subtitles line up with
+  // what is actually said instead of being invented.
+  const segments = Array.isArray(data.segments)
+    ? data.segments.slice(0, MAX_SEGMENTS).map((seg) => ({
+      start: Math.max(0, Number(seg.start) || 0),
+      end: Math.max(0, Number(seg.end) || 0),
+      text: String(seg.text || "").trim().slice(0, 400),
+    })).filter((seg) => seg.text.length > 0)
+    : [];
+  return {
+    transcript: data.text || "",
+    segments,
+    language: typeof data.language === "string" ? data.language : null,
+    durationMinutes: billedSeconds / 60,
+  };
 }
 
 /**

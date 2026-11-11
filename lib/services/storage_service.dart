@@ -73,15 +73,34 @@ class StorageService {
         return null;
       }
 
-      final editsPath = await getPlatformDownloadPath('Edits');
       final timestamp = DateTime.now().millisecondsSinceEpoch;
       final safeName = fileName.replaceAll(RegExp(r'[^a-zA-Z0-9._-]'), '_');
       final extension = sourcePath.split('.').last;
-      final newFileName = '${editType}_${timestamp}_$safeName.$extension';
-      final fullPath = '$editsPath/$newFileName';
+      // Avoid "name.png.png" when the title already ends in the extension.
+      final baseName = safeName.toLowerCase().endsWith('.$extension'.toLowerCase())
+          ? safeName.substring(0, safeName.length - extension.length - 1)
+          : safeName;
+      final newFileName = '${editType}_${timestamp}_$baseName.$extension';
 
-      await sourceFile.copy(fullPath);
-      await scanMediaFile(fullPath);
+      String fullPath;
+      try {
+        final editsPath = await getPlatformDownloadPath('Edits');
+        fullPath = '$editsPath/$newFileName';
+        await sourceFile.copy(fullPath);
+        await scanMediaFile(fullPath);
+      } catch (e) {
+        // Shared storage refused the write (common on Android 11+ without
+        // broad storage access). Keep the edit in the app's own folder so
+        // it is never lost and still shows up under Saved Edits.
+        print('⚠️ Public Edits folder not writable ($e) — using app storage');
+        final docs = await getApplicationDocumentsDirectory();
+        final folder = Directory('${docs.path}/MediaNest/Edits');
+        if (!await folder.exists()) {
+          await folder.create(recursive: true);
+        }
+        fullPath = '${folder.path}/$newFileName';
+        await sourceFile.copy(fullPath);
+      }
       await _trackEdit(fullPath, fileName, editType);
 
       print('✅ Saved edit: $fullPath');
@@ -100,8 +119,10 @@ class StorageService {
       final prefs = await SharedPreferences.getInstance();
       final edits = prefs.getStringList('saved_edits') ?? [];
 
+      // '|' is the field separator, so it must not appear inside a name.
+      final cleanName = originalName.replaceAll('|', '_');
       final editInfo =
-          '$path|$originalName|$editType|${DateTime.now().millisecondsSinceEpoch}';
+          '$path|$cleanName|$editType|${DateTime.now().millisecondsSinceEpoch}';
       edits.add(editInfo);
 
       if (edits.length > 500) {
@@ -163,7 +184,7 @@ class StorageService {
 
       final prefs = await SharedPreferences.getInstance();
       final edits = prefs.getStringList('saved_edits') ?? [];
-      edits.removeWhere((edit) => edit.startsWith(path));
+      edits.removeWhere((edit) => edit.startsWith('$path|'));
       await prefs.setStringList('saved_edits', edits);
 
       return true;

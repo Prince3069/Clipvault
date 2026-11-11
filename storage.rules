@@ -1,37 +1,73 @@
 rules_version = '2';
 
-// ClipVault Storage rules.
+// MediaNest — Cloud Storage security rules.
 //
-// Cloud Vault Pro uploads/downloads go directly from the Flutter client to
-// Storage (CloudVaultProvider.uploadFile/downloadFile), at paths shaped
-// exactly like: users/{uid}/cloud_vault/{timestamp}_{fileName}
+// The only thing the app stores here is Cloud Vault media, always inside
+// the signed-in user's own folder:
 //
-// Everything outside the paths below stays denied, same posture as your
-// original default — this only opens exactly what the app needs.
+//   users/{uid}/cloud_vault/…          files uploaded from the Cloud Vault screen
+//   users/{uid}/cloud_vault/thumbs/…   their video preview images
+//   users/{uid}/videos/…               auto-backed-up downloads
+//   users/{uid}/images/…
+//   users/{uid}/thumbnails/…
+//
+// NOTE: hasActivePremium() reads Firestore from Storage rules ("cross-
+// service rules"). The first time you deploy/publish these rules Firebase
+// asks to grant Storage permission to read Firestore — accept it, or
+// uploads will be denied for everyone except the owner accounts.
 
 service firebase.storage {
   match /b/{bucket}/o {
 
-    match /users/{uid}/cloud_vault/{allFiles=**} {
-      allow read, write: if request.auth != null && request.auth.uid == uid;
+    function isSelf(uid) {
+      return request.auth != null && request.auth.uid == uid;
     }
 
-    // Temporary hand-off for Repurpose Studio's video analysis. The app
-    // uploads the video it already has on the phone here; the server reads
-    // it with the Admin SDK (which bypasses these rules), transcribes it,
-    // and deletes it. So the client needs CREATE only — never read, never
-    // overwrite, never delete. Size and type are capped here as well as in
-    // the function, so an oversized or non-video upload is refused before
-    // it is ever stored. 24MB matches MAX_VIDEO_BYTES in videoAnalysis.js.
-    match /users/{uid}/analysis_temp/{fileId} {
-      allow create: if request.auth != null
-                    && request.auth.uid == uid
-                    && request.resource.size > 0
-                    && request.resource.size <= 24 * 1024 * 1024
-                    && request.resource.contentType.matches('video/.*');
-      allow read, update, delete: if false;
+    // Owner / producer accounts — always Pro. Keep identical to
+    // OWNER_EMAILS in functions/lib/middleware.js.
+    function isOwnerAccount() {
+      return request.auth != null
+        && request.auth.token.email_verified == true
+        && request.auth.token.email in [
+             'princenwanozie6666@gmail.com',
+             'ifeanyinwanozie6666@gmail.com'
+           ];
     }
 
+    function hasActivePremium(uid) {
+      return isOwnerAccount()
+        || (firestore.exists(/databases/(default)/documents/users/$(uid))
+            && firestore.get(/databases/(default)/documents/users/$(uid)).data.get('premiumExpiry', null) is timestamp
+            && firestore.get(/databases/(default)/documents/users/$(uid)).data.premiumExpiry > request.time);
+    }
+
+    // Photos and videos only, 500 MB per file at most. (The 3 GB total
+    // quota is enforced by the app + the Firestore record rules.)
+    function validMedia() {
+      return request.resource.size > 0
+        && request.resource.size <= 500 * 1024 * 1024
+        && (request.resource.contentType.matches('image/.*')
+            || request.resource.contentType.matches('video/.*'));
+    }
+
+    match /users/{uid}/{allPaths=**} {
+      // Viewing / downloading your own files — also after a subscription
+      // lapses, so files are never held hostage.
+      allow get: if isSelf(uid);
+      allow list: if isSelf(uid);
+
+      // New uploads need an active subscription. `create` only: an
+      // existing file can never be silently overwritten.
+      allow create: if isSelf(uid)
+                    && hasActivePremium(uid)
+                    && validMedia();
+      allow update: if false;
+
+      // Removing your own files is always allowed.
+      allow delete: if isSelf(uid);
+    }
+
+    // Everything else in the bucket is closed.
     match /{allPaths=**} {
       allow read, write: if false;
     }

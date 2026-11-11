@@ -12,12 +12,11 @@
 // idle.
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../services/ai_service.dart';
 import '../../providers/premium_provider.dart';
-import '../../providers/download_provider.dart';
-import '../../providers/media_provider.dart';
 import '../themes/app_theme.dart';
 import 'premium_screen.dart';
 
@@ -75,6 +74,8 @@ class CoachChallenge {
   final List<String> steps;
   final String? tip;
   final bool isCompleted;
+  // Points the server awards for this challenge.
+  final int points;
 
   const CoachChallenge({
     required this.id,
@@ -86,6 +87,7 @@ class CoachChallenge {
     required this.steps,
     this.tip,
     this.isCompleted = false,
+    this.points = 10,
   });
 
   factory CoachChallenge.fromJson(Map<String, dynamic> json) {
@@ -145,10 +147,22 @@ class _AIContentCoachState extends State<AIContentCoach>
   // ─── Coach Data ──────────────────────────────────────────────────────
   List<CoachChallenge> _dailyChallenges = [];
   List<CoachChallenge> _completedChallenges = [];
-  Map<String, dynamic> _analysis = {};
   List<Map<String, dynamic>> _contentIdeas = [];
   int _streak = 0;
   int _points = 0;
+  String? _challengeError;
+
+  // Ideas + tips + 30-day activity (one server call).
+  List<String> _coachTips = [];
+  Map<String, dynamic> _activity = {};
+  bool _ideasLoading = false;
+  String? _ideasError;
+
+  // Learning path.
+  List<Map<String, dynamic>> _planSteps = [];
+  Set<String> _planCompleted = {};
+  bool _planLoading = false;
+  String? _planError;
 
   // ─── Animation ──────────────────────────────────────────────────────
   late AnimationController _pulseController;
@@ -234,6 +248,17 @@ class _AIContentCoachState extends State<AIContentCoach>
       if (serverName != null && serverName.isNotEmpty) {
         _userName = serverName;
       }
+      final serverGoal = profile['goal'] as String?;
+      if (serverGoal != null && serverGoal.isNotEmpty) {
+        _selectedGoal = CoachGoal.values.firstWhere(
+          (g) => g.label.toLowerCase() == serverGoal.toLowerCase(),
+          orElse: () => _selectedGoal,
+        );
+      }
+      final serverExperience = profile['experience'] as String?;
+      if (serverExperience != null && serverExperience.isNotEmpty) {
+        _experienceLevel = serverExperience;
+      }
 
       // ─── Today's real challenge, generated server-side ─────────────
       final challengeData = await _ai.getDailyChallenge();
@@ -246,14 +271,18 @@ class _AIContentCoachState extends State<AIContentCoach>
           _dailyChallenges = [c];
           _completedChallenges = [];
         }
+        _challengeError = null;
       } else {
         _dailyChallenges = [];
         _completedChallenges = [];
+        _challengeError = 'Could not load today\'s challenge. Check your '
+            'connection and tap refresh.';
       }
 
-      // Content analysis + ideas stay local (they don't touch the server)
-      await _analyzeContent();
-      await _generateContentIdeas();
+      // Ideas, tips and the learning path load in the background — the
+      // dashboard and today's challenge show as soon as they are ready.
+      _loadIdeas();
+      _loadPlan();
     } catch (e) {
       if (mounted) setState(() => _error = 'Failed to load coach data: $e');
     } finally {
@@ -275,197 +304,149 @@ class _AIContentCoachState extends State<AIContentCoach>
     final completed = data['completed'] == true;
     final dateId = data['date'] as String? ??
         DateTime.now().toIso8601String().split('T')[0];
+    final steps = (data['steps'] as List? ?? const [])
+        .map((e) => e.toString())
+        .where((e) => e.trim().isNotEmpty)
+        .toList();
+    final serverTip = (data['tip'] as String?)?.trim();
+    final points = (data['points'] as num?)?.toInt() ??
+        (difficulty == 'hard' ? 30 : (difficulty == 'medium' ? 20 : 10));
+
+    const featureNames = {
+      'repurpose': 'Repurpose Studio',
+      'translate': 'Translator',
+      'download': 'Downloader',
+    };
+    const featureHowTo = {
+      'repurpose': 'Use Repurpose Studio at least once today, then tap '
+          'Complete.',
+      'translate': 'Translate something today, then tap Complete.',
+      'download': 'Download a video or photo today, then tap Complete.',
+    };
+
+    String? tip;
+    if (completed) {
+      tip = 'Completed today — nice work!';
+    } else if (verifyFeature != null && featureHowTo[verifyFeature] != null) {
+      tip = serverTip != null && serverTip.isNotEmpty
+          ? '$serverTip  ${featureHowTo[verifyFeature]}'
+          : featureHowTo[verifyFeature];
+    } else if (serverTip != null && serverTip.isNotEmpty) {
+      tip = serverTip;
+    }
 
     return CoachChallenge(
       id: dateId,
       title: data['title'] as String? ?? "Today's challenge",
       description: data['description'] as String? ?? '',
-      category: verifyFeature != null
-          ? 'Use ${verifyFeature[0].toUpperCase()}${verifyFeature.substring(1)}'
-          : 'AI Coach',
+      category: featureNames[verifyFeature] ?? 'Creator task',
       difficulty: diffInt,
       estimatedMinutes: estMinutes,
-      steps: const [],
-      tip: completed
-          ? 'Completed today — nice work!'
-          : (verifyFeature != null
-              ? 'Verified challenge: use $verifyFeature at least once today to complete it.'
-              : null),
+      steps: steps,
+      tip: tip,
       isCompleted: completed,
+      points: points,
     );
   }
 
-  // ─── AI Analysis ─────────────────────────────────────────────────────
+  // ─── Ideas, tips & activity (server-generated) ───────────────────────
 
-  Future<void> _analyzeContent() async {
-    try {
-      final mediaProvider = Provider.of<MediaProvider>(context, listen: false);
-      final allMedia = mediaProvider.allMedia;
-
-      if (allMedia.isEmpty) {
-        _analysis = {
-          'status': 'empty',
-          'message': 'Download some content to get personalized analysis',
-        };
+  Future<void> _loadIdeas({bool refresh = false}) async {
+    if (_ideasLoading) return;
+    if (mounted) {
+      setState(() {
+        _ideasLoading = true;
+        _ideasError = null;
+      });
+    }
+    final data = await _ai.getCoachIdeas(refresh: refresh);
+    if (!mounted) return;
+    setState(() {
+      _ideasLoading = false;
+      if (data['error'] != null) {
+        _ideasError = data['error'].toString();
         return;
       }
-
-      final stats = await _ai.getLibraryStats();
-
-      final categories = stats['categories'] as Map<String, dynamic>? ?? {};
-      final topCategory = categories.entries.isNotEmpty
-          ? categories.entries.reduce((a, b) => a.value > b.value ? a : b).key
-          : 'Unknown';
-
-      final platforms = stats['platforms'] as Map<String, dynamic>? ?? {};
-      final topPlatform = platforms.entries.isNotEmpty
-          ? platforms.entries.reduce((a, b) => a.value > b.value ? a : b).key
-          : 'Unknown';
-
-      _analysis = {
-        'status': 'ready',
-        'totalItems': allMedia.length,
-        'topCategory': topCategory,
-        'topPlatform': topPlatform,
-        'categories': categories,
-        'platforms': platforms,
-        'contentMix': {
-          'videos': allMedia.where((m) => m.isVideo).length,
-          'images': allMedia.where((m) => !m.isVideo).length,
-        },
-        'recommendations': _generateRecommendations(topCategory, topPlatform),
-        'createdAt': DateTime.now().toIso8601String(),
-      };
-    } catch (e) {
-      debugPrint('Analysis error: $e');
-      _analysis = {
-        'status': 'error',
-        'message': 'Could not analyze content: $e',
-      };
+      _contentIdeas = (data['ideas'] as List? ?? const [])
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+      _coachTips = (data['tips'] as List? ?? const [])
+          .map((e) => e.toString())
+          .where((e) => e.trim().isNotEmpty)
+          .toList();
+      _activity = data['activity'] is Map
+          ? Map<String, dynamic>.from(data['activity'] as Map)
+          : <String, dynamic>{};
+    });
+    if (refresh) {
+      Provider.of<PremiumProvider>(context, listen: false)
+          .refreshCreditBalance();
     }
   }
 
-  List<String> _generateRecommendations(
-      String topCategory, String topPlatform) {
-    final recommendations = <String>[];
+  // ─── Learning path (server-generated, progress saved) ────────────────
 
-    switch (topCategory) {
-      case 'Comedy':
-        recommendations.add(
-            '🎭 Try different humor styles: observational, situational, parody');
-        recommendations.add('📊 Track which jokes get the best response');
-        break;
-      case 'Tutorial':
-        recommendations.add('📚 Create a series of related tutorials');
-        recommendations.add('🎯 Make sure each tutorial has a clear takeaway');
-        break;
-      case 'Music':
-        recommendations.add('🎵 Experiment with different genres and formats');
-        recommendations.add('🎤 Use captions to make lyrics accessible');
-        break;
-      case 'Fitness':
-        recommendations.add('💪 Show progress and transformations');
-        recommendations
-            .add('🏋️ Create beginner-friendly versions of exercises');
-        break;
-      default:
-        recommendations.add('📈 Analyze which of your posts perform best');
-        recommendations.add('🎯 Double down on what\'s working');
+  Future<void> _loadPlan() async {
+    if (_planLoading) return;
+    if (mounted) {
+      setState(() {
+        _planLoading = true;
+        _planError = null;
+      });
     }
-
-    if (topPlatform == 'tiktok') {
-      recommendations.add('🎵 Use trending sounds to increase discoverability');
-      recommendations
-          .add('⏱️ Keep videos between 15-30 seconds for best retention');
-    } else if (topPlatform == 'instagram') {
-      recommendations
-          .add('📸 Use high-quality visuals and consistent aesthetics');
-      recommendations.add('📝 Write captions that encourage comments');
-    }
-
-    recommendations.add('📊 Post consistently to build momentum');
-
-    return recommendations;
+    final data = await _ai.getCoachPlan();
+    if (!mounted) return;
+    setState(() {
+      _planLoading = false;
+      if (data['error'] != null) {
+        _planError = data['error'].toString();
+        return;
+      }
+      _planSteps = (data['steps'] as List? ?? const [])
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+      _planCompleted = (data['completed'] as List? ?? const [])
+          .map((e) => e.toString())
+          .toSet();
+    });
   }
 
-  // ─── Content Ideas ──────────────────────────────────────────────────
-
-  Future<void> _generateContentIdeas() async {
-    if (mounted) setState(() => _isProcessing = true);
-
-    try {
-      _contentIdeas = [
-        {
-          'title': 'Behind the Scenes',
-          'description': 'Show your creative process and workspace',
-          'format': 'video',
-          'difficulty': 2,
-          'estimatedTime': 15,
-          'hook': 'Ever wondered how this is made? 🤔',
-        },
-        {
-          'title': 'Top 5 Tips',
-          'description': 'Share your expertise in a quick list',
-          'format': 'video',
-          'difficulty': 1,
-          'estimatedTime': 10,
-          'hook': 'Here are 5 things I wish I knew earlier 📝',
-        },
-        {
-          'title': 'Common Mistakes',
-          'description': 'Help others avoid your early mistakes',
-          'format': 'video',
-          'difficulty': 2,
-          'estimatedTime': 20,
-          'hook': 'Don\'t make this mistake like I did 🚫',
-        },
-        {
-          'title': 'Day in the Life',
-          'description': 'Document a full day as a creator',
-          'format': 'video',
-          'difficulty': 3,
-          'estimatedTime': 30,
-          'hook': 'This is what a real day looks like 👀',
-        },
-        {
-          'title': 'Tool Review',
-          'description': 'Share your favorite tools or apps',
-          'format': 'video',
-          'difficulty': 1,
-          'estimatedTime': 10,
-          'hook': 'This tool changed everything for me 🛠️',
-        },
-        {
-          'title': 'Q&A Session',
-          'description': 'Answer your audience\'s burning questions',
-          'format': 'video',
-          'difficulty': 2,
-          'estimatedTime': 20,
-          'hook': 'You asked, I answered 📢',
-        },
-        {
-          'title': 'Trend Take',
-          'description': 'Put your unique spin on a current trend',
-          'format': 'video',
-          'difficulty': 2,
-          'estimatedTime': 15,
-          'hook': 'My take on this trend 💭',
-        },
-        {
-          'title': 'Motivation Moment',
-          'description': 'Inspire others with your story',
-          'format': 'text',
-          'difficulty': 1,
-          'estimatedTime': 10,
-          'hook': 'If I can do it, so can you ✨',
-        },
-      ];
-    } catch (e) {
-      debugPrint('Content ideas error: $e');
-      _contentIdeas = [];
-    } finally {
-      if (mounted) setState(() => _isProcessing = false);
+  Future<void> _togglePlanStep(String stepId) async {
+    final wasDone = _planCompleted.contains(stepId);
+    // Update the tick immediately; undo it if the server can't save.
+    setState(() {
+      if (wasDone) {
+        _planCompleted.remove(stepId);
+      } else {
+        _planCompleted.add(stepId);
+      }
+    });
+    final saved = await _ai.setCoachStepDone(stepId, !wasDone);
+    if (!mounted) return;
+    if (saved == null) {
+      setState(() {
+        if (wasDone) {
+          _planCompleted.add(stepId);
+        } else {
+          _planCompleted.remove(stepId);
+        }
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Could not save your progress. Try again.'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } else {
+      setState(() => _planCompleted = saved.toSet());
     }
+  }
+
+  String _platformLabel(String raw) {
+    if (raw.isEmpty || raw == 'unknown') return 'Other';
+    return raw[0].toUpperCase() + raw.substring(1);
   }
 
   // ─── User Actions ────────────────────────────────────────────────────
@@ -479,13 +460,17 @@ class _AIContentCoachState extends State<AIContentCoach>
       if (!mounted) return;
 
       if (result['success'] == true) {
+        final pointsEarned =
+            (result['pointsEarned'] as num?)?.toInt() ?? challenge.points;
         setState(() {
           _dailyChallenges.removeWhere((c) => c.id == challenge.id);
           if (!_completedChallenges.any((c) => c.id == challenge.id)) {
             _completedChallenges.add(challenge);
           }
           _streak = (result['newStreak'] as num?)?.toInt() ?? (_streak + 1);
-          _points += challenge.difficulty * 10;
+          // The server's totals are the truth — never a local guess.
+          _points = (result['points'] as num?)?.toInt() ??
+              (_points + pointsEarned);
           _isProcessing = false;
         });
 
@@ -497,7 +482,7 @@ class _AIContentCoachState extends State<AIContentCoach>
                 const SizedBox(width: AppSpacing.sm),
                 Expanded(
                   child: Text(
-                    '🎉 Challenge complete! +${challenge.difficulty * 10} points',
+                    '🎉 Challenge complete! +$pointsEarned points',
                     style: const TextStyle(color: Colors.white),
                   ),
                 ),
@@ -509,9 +494,9 @@ class _AIContentCoachState extends State<AIContentCoach>
           ),
         );
 
-        await _ai.trackEvent('coach_challenge_completed', properties: {
+        _ai.trackEvent('coach_challenge_completed', properties: {
           'challenge_id': challenge.id,
-          'points_earned': challenge.difficulty * 10,
+          'points_earned': pointsEarned,
         });
       } else {
         setState(() => _isProcessing = false);
@@ -540,7 +525,12 @@ class _AIContentCoachState extends State<AIContentCoach>
     }
   }
 
+  bool _savingProfile = false;
+
   Future<void> _saveOnboarding() async {
+    if (_savingProfile) return;
+    setState(() => _savingProfile = true);
+
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('coach_user_name', _userName);
     await prefs.setString('coach_goal', _selectedGoal.toString());
@@ -549,22 +539,31 @@ class _AIContentCoachState extends State<AIContentCoach>
     await prefs.setStringList('coach_interests', _interests);
     await prefs.setBool('coach_onboarding_complete', true);
 
-    // Sync to Firestore — this is what makes /getDailyChallenge actually
-    // generate challenges for the person's real niche instead of falling
-    // back to "general content creation". Non-fatal: if it fails, the
-    // local prefs still work for display, and the next Coach screen open
-    // will retry.
+    // Sync to the server — this is what makes challenges, ideas and the
+    // learning path get written for the person's real niche and goal.
+    // Non-fatal: if it fails, the local prefs still work for display and
+    // the next save retries.
     try {
       await _ai.saveCoachProfile(
         niche: _selectedNiche.label,
         goal: _selectedGoal.label,
         name: _userName,
+        experience: _experienceLevel,
       );
     } catch (e) {
       debugPrint('Coach profile sync failed (non-fatal): $e');
     }
 
-    setState(() => _isOnboarding = false);
+    if (!mounted) return;
+    setState(() {
+      _savingProfile = false;
+      _isOnboarding = false;
+      // The old ideas / path were written for the previous answers.
+      _contentIdeas = [];
+      _coachTips = [];
+      _planSteps = [];
+      _planCompleted = {};
+    });
     await _loadUserData();
   }
 
@@ -583,10 +582,28 @@ class _AIContentCoachState extends State<AIContentCoach>
     }
 
     if (_isLoading) {
-      return const Center(
-        child: CircularProgressIndicator(
-          color: AppColors.primary,
-          strokeWidth: 2,
+      return Scaffold(
+        backgroundColor: AppColors.bg,
+        appBar: AppBar(
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+          title: const Text('AI Coach'),
+        ),
+        body: const Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              CircularProgressIndicator(
+                color: AppColors.primary,
+                strokeWidth: 2,
+              ),
+              SizedBox(height: AppSpacing.md),
+              Text(
+                'Getting your coach ready...',
+                style: TextStyle(color: AppColors.textMuted, fontSize: 13),
+              ),
+            ],
+          ),
         ),
       );
     }
@@ -685,7 +702,9 @@ class _AIContentCoachState extends State<AIContentCoach>
             size: 20,
           ),
           SizedBox(width: AppSpacing.sm),
-          Text('AI Coach'),
+          Flexible(
+            child: Text('AI Coach', overflow: TextOverflow.ellipsis),
+          ),
         ],
       ),
       actions: [
@@ -756,6 +775,12 @@ class _AIContentCoachState extends State<AIContentCoach>
         IconButton(
           icon: const Icon(Icons.refresh_rounded),
           onPressed: _loadUserData,
+          tooltip: 'Refresh',
+        ),
+        IconButton(
+          icon: const Icon(Icons.tune_rounded),
+          onPressed: () => setState(() => _isOnboarding = true),
+          tooltip: 'Edit niche & goal',
         ),
       ],
     );
@@ -790,6 +815,7 @@ class _AIContentCoachState extends State<AIContentCoach>
               onTap: () => setState(() => _selectedTab = index),
               child: Container(
                 margin: const EdgeInsets.all(4),
+                padding: const EdgeInsets.symmetric(horizontal: 4),
                 decoration: BoxDecoration(
                   color: isSelected ? AppColors.primary : Colors.transparent,
                   borderRadius: BorderRadius.circular(AppRadius.sm),
@@ -803,13 +829,20 @@ class _AIContentCoachState extends State<AIContentCoach>
                       size: 16,
                     ),
                     const SizedBox(width: 4),
-                    Text(
-                      tab['label'] as String,
-                      style: TextStyle(
-                        color: isSelected ? Colors.white : AppColors.textMuted,
-                        fontSize: 12,
-                        fontWeight:
-                            isSelected ? FontWeight.w600 : FontWeight.w400,
+                    Flexible(
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        child: Text(
+                          tab['label'] as String,
+                          maxLines: 1,
+                          style: TextStyle(
+                            color:
+                                isSelected ? Colors.white : AppColors.textMuted,
+                            fontSize: 12,
+                            fontWeight:
+                                isSelected ? FontWeight.w600 : FontWeight.w400,
+                          ),
+                        ),
                       ),
                     ),
                   ],
@@ -825,7 +858,11 @@ class _AIContentCoachState extends State<AIContentCoach>
   // ─── Dashboard ──────────────────────────────────────────────────────
 
   Widget _buildDashboard() {
-    final analysis = _analysis;
+    final totalDownloads = (_activity['totalDownloads'] as num?)?.toInt() ?? 0;
+    final repurposeCount = (_activity['repurposeCount'] as num?)?.toInt() ?? 0;
+    final translateCount = (_activity['translateCount'] as num?)?.toInt() ?? 0;
+    final topPlatform = (_activity['topPlatform'] as String?) ?? '';
+    final hasActivity = _activity.isNotEmpty;
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(AppSpacing.md),
@@ -865,6 +902,8 @@ class _AIContentCoachState extends State<AIContentCoach>
                     children: [
                       Text(
                         'Good ${_getTimeOfDay()}, $_userName!',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
                           color: Colors.white,
                           fontSize: 16,
@@ -872,7 +911,9 @@ class _AIContentCoachState extends State<AIContentCoach>
                         ),
                       ),
                       Text(
-                        'Keep creating and growing 🚀',
+                        'Goal: ${_selectedGoal.label}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                         style: TextStyle(
                           color: Colors.white.withValues(alpha: 0.8),
                           fontSize: 13,
@@ -907,7 +948,7 @@ class _AIContentCoachState extends State<AIContentCoach>
             children: [
               _StatCard(
                 label: 'Streak',
-                value: '$_streak days',
+                value: _streak == 1 ? '1 day' : '$_streak days',
                 icon: Icons.local_fire_department_rounded,
                 color: AppColors.warning,
               ),
@@ -920,82 +961,127 @@ class _AIContentCoachState extends State<AIContentCoach>
               ),
               const SizedBox(width: AppSpacing.sm),
               _StatCard(
-                label: 'Challenges',
-                value: '${_completedChallenges.length}',
+                label: 'Today',
+                value: _completedChallenges.isNotEmpty ? 'Done' : 'To do',
                 icon: Icons.task_alt_rounded,
                 color: AppColors.success,
               ),
             ],
           ),
           const SizedBox(height: AppSpacing.md),
-          if (analysis.isNotEmpty && analysis['status'] == 'ready') ...[
-            Container(
-              padding: const EdgeInsets.all(AppSpacing.md),
-              decoration: BoxDecoration(
-                color: AppColors.surface,
-                borderRadius: BorderRadius.circular(AppRadius.lg),
-                border: Border.all(color: AppColors.borderLight),
-                boxShadow: AppShadows.soft,
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      const Icon(
-                        Icons.analytics_rounded,
-                        color: AppColors.primary,
-                        size: 20,
-                      ),
-                      const SizedBox(width: AppSpacing.sm),
-                      const Text(
-                        'Content Analysis',
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(AppSpacing.md),
+            decoration: BoxDecoration(
+              color: AppColors.surface,
+              borderRadius: BorderRadius.circular(AppRadius.lg),
+              border: Border.all(color: AppColors.borderLight),
+              boxShadow: AppShadows.soft,
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Row(
+                  children: [
+                    Icon(
+                      Icons.analytics_rounded,
+                      color: AppColors.primary,
+                      size: 20,
+                    ),
+                    SizedBox(width: AppSpacing.sm),
+                    Expanded(
+                      child: Text(
+                        'Your last 30 days',
                         style: AppTypography.titleMedium,
                       ),
-                      const Spacer(),
-                      Text(
-                        '${analysis['totalItems']} items',
-                        style: AppTypography.caption.copyWith(
-                          color: AppColors.textMuted,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: AppSpacing.md),
+                if (_ideasLoading && !hasActivity)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: AppSpacing.sm),
+                    child: Row(
+                      children: [
+                        SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: AppColors.primary),
                         ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: AppSpacing.md),
+                        SizedBox(width: AppSpacing.sm),
+                        Text(
+                          'Looking at your activity...',
+                          style: TextStyle(
+                              color: AppColors.textMuted, fontSize: 13),
+                        ),
+                      ],
+                    ),
+                  )
+                else if (!hasActivity && _ideasError != null)
+                  Text(
+                    _ideasError!,
+                    style: AppTypography.bodySmall
+                        .copyWith(color: AppColors.textMuted),
+                  )
+                else ...[
                   Row(
                     children: [
+                      _AnalysisItem(label: 'Downloads', value: '$totalDownloads'),
                       _AnalysisItem(
-                        label: 'Top Category',
-                        value: analysis['topCategory'] ?? 'N/A',
-                      ),
-                      _AnalysisItem(
-                        label: 'Top Platform',
-                        value: analysis['topPlatform'] ?? 'N/A',
+                        label: 'Top platform',
+                        value: topPlatform.isEmpty
+                            ? '—'
+                            : _platformLabel(topPlatform),
                       ),
                     ],
                   ),
+                  const SizedBox(height: AppSpacing.sm),
+                  Row(
+                    children: [
+                      _AnalysisItem(label: 'Repurposed', value: '$repurposeCount'),
+                      _AnalysisItem(label: 'Translations', value: '$translateCount'),
+                    ],
+                  ),
+                  if (totalDownloads == 0 &&
+                      repurposeCount == 0 &&
+                      translateCount == 0) ...[
+                    const SizedBox(height: AppSpacing.sm),
+                    Text(
+                      'Nothing yet — download or repurpose a video and your '
+                      'coach will tailor its advice to what you do.',
+                      style: AppTypography.bodySmall
+                          .copyWith(color: AppColors.textMuted),
+                    ),
+                  ],
+                ],
+                if (_coachTips.isNotEmpty) ...[
                   const SizedBox(height: AppSpacing.md),
                   const Divider(height: 1),
                   const SizedBox(height: AppSpacing.md),
                   const Text(
-                    'Recommendations',
+                    'Coach tips for you',
                     style: AppTypography.bodyMedium,
                   ),
                   const SizedBox(height: AppSpacing.sm),
-                  ...(analysis['recommendations'] as List<String>? ?? []).map(
-                    (rec) => Padding(
-                      padding: const EdgeInsets.only(bottom: 4),
+                  ..._coachTips.map(
+                    (tip) => Padding(
+                      padding: const EdgeInsets.only(bottom: 6),
                       child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          const Icon(
-                            Icons.chevron_right_rounded,
-                            color: AppColors.primary,
-                            size: 16,
+                          const Padding(
+                            padding: EdgeInsets.only(top: 1),
+                            child: Icon(
+                              Icons.chevron_right_rounded,
+                              color: AppColors.primary,
+                              size: 16,
+                            ),
                           ),
                           const SizedBox(width: 4),
                           Expanded(
                             child: Text(
-                              rec,
+                              tip,
                               style: AppTypography.bodySmall,
                             ),
                           ),
@@ -1004,9 +1090,9 @@ class _AIContentCoachState extends State<AIContentCoach>
                     ),
                   ),
                 ],
-              ),
+              ],
             ),
-          ],
+          ),
           const SizedBox(height: AppSpacing.md),
           if (_dailyChallenges.isNotEmpty) ...[
             Container(
@@ -1036,13 +1122,14 @@ class _AIContentCoachState extends State<AIContentCoach>
                         ),
                       ),
                       const SizedBox(width: AppSpacing.sm),
-                      const Text(
-                        'Daily Challenge',
-                        style: AppTypography.titleMedium,
+                      const Expanded(
+                        child: Text(
+                          'Daily Challenge',
+                          style: AppTypography.titleMedium,
+                        ),
                       ),
-                      const Spacer(),
                       Text(
-                        '${_dailyChallenges.length} left',
+                        '+${_dailyChallenges.first.points} pts',
                         style: AppTypography.caption.copyWith(
                           color: AppColors.textMuted,
                         ),
@@ -1052,12 +1139,34 @@ class _AIContentCoachState extends State<AIContentCoach>
                   const SizedBox(height: AppSpacing.sm),
                   _ChallengeCard(
                     challenge: _dailyChallenges.first,
-                    onComplete: _completeChallenge,
+                    onComplete: _isProcessing ? null : _completeChallenge,
                   ),
                 ],
               ),
             ),
+          ] else if (_completedChallenges.isNotEmpty) ...[
+            _ChallengeCard(
+              challenge: _completedChallenges.first,
+              isCompleted: true,
+            ),
+          ] else if (_challengeError != null) ...[
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(AppSpacing.md),
+              decoration: BoxDecoration(
+                color: AppColors.surface,
+                borderRadius: BorderRadius.circular(AppRadius.lg),
+                border: Border.all(color: AppColors.borderLight),
+              ),
+              child: Text(
+                _challengeError!,
+                style: AppTypography.bodySmall
+                    .copyWith(color: AppColors.textMuted),
+              ),
+            ),
           ],
+          // Clears the phone's navigation bar on edge-to-edge devices.
+          SizedBox(height: MediaQuery.of(context).padding.bottom),
         ],
       ),
     );
@@ -1072,8 +1181,8 @@ class _AIContentCoachState extends State<AIContentCoach>
       return _buildEmptyState(
         icon: Icons.task_alt_rounded,
         title: 'No Challenge Today',
-        description:
-            'Pull down to refresh, or check back tomorrow for a new one.',
+        description: _challengeError ??
+            'Tap refresh at the top, or check back tomorrow for a new one.',
       );
     }
 
@@ -1096,20 +1205,56 @@ class _AIContentCoachState extends State<AIContentCoach>
   // ─── Ideas Tab ──────────────────────────────────────────────────────
 
   Widget _buildIdeas() {
+    if (_ideasLoading && _contentIdeas.isEmpty) {
+      return _buildBusyState('Writing ideas for your niche...');
+    }
     if (_contentIdeas.isEmpty) {
       return _buildEmptyState(
         icon: Icons.lightbulb_rounded,
         title: 'No Ideas Yet',
-        description: 'Generate ideas based on your niche and goals.',
+        description:
+            _ideasError ?? 'Get ideas written for your niche and goal.',
+        actionLabel: 'Get ideas',
+        onAction: () => _loadIdeas(refresh: _ideasError == null),
       );
     }
 
     return ListView.builder(
-      padding: const EdgeInsets.all(AppSpacing.md),
-      itemCount: _contentIdeas.length,
+      padding: EdgeInsets.fromLTRB(AppSpacing.md, AppSpacing.md, AppSpacing.md,
+          AppSpacing.md + MediaQuery.of(context).padding.bottom),
+      itemCount: _contentIdeas.length + 1,
       itemBuilder: (context, index) {
-        final idea = _contentIdeas[index];
-        return _IdeaCard(idea: idea);
+        if (index == 0) {
+          return Padding(
+            padding: const EdgeInsets.only(bottom: AppSpacing.sm),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'For ${_selectedNiche.label} · ${_selectedGoal.label}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: AppTypography.caption
+                        .copyWith(color: AppColors.textMuted),
+                  ),
+                ),
+                TextButton.icon(
+                  onPressed:
+                      _ideasLoading ? null : () => _loadIdeas(refresh: true),
+                  icon: _ideasLoading
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.refresh_rounded, size: 16),
+                  label: const Text('New ideas'),
+                ),
+              ],
+            ),
+          );
+        }
+        return _IdeaCard(idea: _contentIdeas[index - 1]);
       },
     );
   }
@@ -1117,53 +1262,108 @@ class _AIContentCoachState extends State<AIContentCoach>
   // ─── Learning Path Tab ─────────────────────────────────────────────
 
   Widget _buildLearningPath() {
-    final learningPath = [
-      {
-        'title': 'Getting Started with Content Creation',
-        'description': 'Learn the fundamentals of creating engaging content',
-        'lessonCount': 5,
-        'icon': Icons.start_rounded,
-      },
-      {
-        'title': 'Growth Hacking for Creators',
-        'description': 'Proven strategies to grow your audience',
-        'lessonCount': 7,
-        'icon': Icons.trending_up_rounded,
-      },
-      {
-        'title': 'Advanced Editing Techniques',
-        'description': 'Take your editing skills to the next level',
-        'lessonCount': 6,
-        'icon': Icons.cut_rounded,
-      },
-    ];
+    if (_planLoading && _planSteps.isEmpty) {
+      return _buildBusyState('Building your learning path...');
+    }
+    if (_planSteps.isEmpty) {
+      return _buildEmptyState(
+        icon: Icons.school_rounded,
+        title: 'No Learning Path Yet',
+        description: _planError ??
+            'Get a step-by-step path built for your goal and level.',
+        actionLabel: 'Build my path',
+        onAction: _loadPlan,
+      );
+    }
+
+    final doneCount =
+        _planSteps.where((s) => _planCompleted.contains(s['id'])).length;
+    final progress = _planSteps.isEmpty ? 0.0 : doneCount / _planSteps.length;
 
     return ListView.builder(
-      padding: const EdgeInsets.all(AppSpacing.md),
-      itemCount: learningPath.length,
+      padding: EdgeInsets.fromLTRB(AppSpacing.md, AppSpacing.md, AppSpacing.md,
+          AppSpacing.md + MediaQuery.of(context).padding.bottom),
+      itemCount: _planSteps.length + 1,
       itemBuilder: (context, index) {
-        final lesson = learningPath[index];
+        if (index == 0) {
+          return Container(
+            margin: const EdgeInsets.only(bottom: AppSpacing.md),
+            padding: const EdgeInsets.all(AppSpacing.md),
+            decoration: BoxDecoration(
+              color: AppColors.primary.withValues(alpha: 0.06),
+              borderRadius: BorderRadius.circular(AppRadius.lg),
+              border: Border.all(
+                  color: AppColors.primary.withValues(alpha: 0.18)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Your path to: ${_selectedGoal.label}',
+                  style: AppTypography.bodyMedium
+                      .copyWith(fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  '$doneCount of ${_planSteps.length} steps done',
+                  style: AppTypography.caption
+                      .copyWith(color: AppColors.textMuted),
+                ),
+                const SizedBox(height: AppSpacing.sm),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: LinearProgressIndicator(
+                    value: progress,
+                    minHeight: 6,
+                    backgroundColor: AppColors.border,
+                    valueColor: const AlwaysStoppedAnimation<Color>(
+                        AppColors.primary),
+                  ),
+                ),
+              ],
+            ),
+          );
+        }
+
+        final step = _planSteps[index - 1];
+        final stepId = (step['id'] ?? 'step$index').toString();
+        final done = _planCompleted.contains(stepId);
+        final action = (step['action'] ?? '').toString();
+        final minutes = (step['minutes'] as num?)?.toInt();
+
         return Container(
           margin: const EdgeInsets.only(bottom: AppSpacing.md),
           padding: const EdgeInsets.all(AppSpacing.md),
           decoration: BoxDecoration(
-            color: AppColors.surface,
+            color: done
+                ? AppColors.success.withValues(alpha: 0.04)
+                : AppColors.surface,
             borderRadius: BorderRadius.circular(AppRadius.lg),
-            border: Border.all(color: AppColors.borderLight),
-            boxShadow: AppShadows.soft,
+            border: Border.all(
+              color: done
+                  ? AppColors.success.withValues(alpha: 0.3)
+                  : AppColors.borderLight,
+            ),
+            boxShadow: done ? null : AppShadows.soft,
           ),
           child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Container(
-                padding: const EdgeInsets.all(AppSpacing.sm),
+                width: 32,
+                height: 32,
+                alignment: Alignment.center,
                 decoration: BoxDecoration(
-                  color: AppColors.primary.withValues(alpha: 0.12),
+                  color: (done ? AppColors.success : AppColors.primary)
+                      .withValues(alpha: 0.12),
                   borderRadius: BorderRadius.circular(AppRadius.md),
                 ),
-                child: Icon(
-                  lesson['icon'] as IconData,
-                  color: AppColors.primary,
-                  size: 24,
+                child: Text(
+                  '$index',
+                  style: TextStyle(
+                    color: done ? AppColors.success : AppColors.primary,
+                    fontWeight: FontWeight.w700,
+                  ),
                 ),
               ),
               const SizedBox(width: AppSpacing.md),
@@ -1172,31 +1372,45 @@ class _AIContentCoachState extends State<AIContentCoach>
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      lesson['title'] as String,
+                      (step['title'] ?? '').toString(),
                       style: AppTypography.bodyMedium.copyWith(
                         fontWeight: FontWeight.w600,
                       ),
                     ),
+                    const SizedBox(height: 2),
                     Text(
-                      lesson['description'] as String,
-                      style: AppTypography.caption.copyWith(
-                        color: AppColors.textMuted,
+                      (step['description'] ?? '').toString(),
+                      style: AppTypography.bodySmall.copyWith(
+                        color: AppColors.textSecondary,
                       ),
                     ),
-                    const SizedBox(height: 4),
-                    Text(
-                      '${lesson['lessonCount'] as int} lessons',
-                      style: AppTypography.caption.copyWith(
-                        color: AppColors.primary,
-                        fontWeight: FontWeight.w600,
+                    if (action.isNotEmpty) ...[
+                      const SizedBox(height: AppSpacing.sm),
+                      Text(
+                        'Do this: $action',
+                        style: AppTypography.bodySmall.copyWith(
+                          color: AppColors.textPrimary,
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
-                    ),
+                    ],
+                    if (minutes != null) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        'About $minutes min',
+                        style: AppTypography.caption.copyWith(
+                          color: AppColors.primary,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),
-              const Icon(
-                Icons.chevron_right_rounded,
-                color: AppColors.textMuted,
+              Checkbox(
+                value: done,
+                activeColor: AppColors.success,
+                onChanged: (_) => _togglePlanStep(stepId),
               ),
             ],
           ),
@@ -1205,179 +1419,211 @@ class _AIContentCoachState extends State<AIContentCoach>
     );
   }
 
+  Widget _buildBusyState(String message) {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const CircularProgressIndicator(
+              color: AppColors.primary, strokeWidth: 2),
+          const SizedBox(height: AppSpacing.md),
+          Text(
+            message,
+            style: const TextStyle(color: AppColors.textMuted, fontSize: 13),
+          ),
+        ],
+      ),
+    );
+  }
+
   // ─── Onboarding ────────────────────────────────────────────────────
 
+  Widget _selectChip({
+    required String label,
+    required IconData icon,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.md,
+          vertical: AppSpacing.sm,
+        ),
+        decoration: BoxDecoration(
+          color: selected
+              ? AppColors.primary.withValues(alpha: 0.12)
+              : AppColors.surface,
+          borderRadius: BorderRadius.circular(AppRadius.md),
+          border: Border.all(
+            color: selected ? AppColors.primary : AppColors.borderLight,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon,
+                color: selected ? AppColors.primary : AppColors.textMuted,
+                size: 16),
+            const SizedBox(width: 4),
+            Text(
+              label,
+              style: TextStyle(
+                color: selected ? AppColors.primary : AppColors.textSecondary,
+                fontSize: 13,
+                fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _onboardingHeading(String text) {
+    return Padding(
+      padding: const EdgeInsets.only(top: AppSpacing.lg, bottom: AppSpacing.sm),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: Text(text, style: AppTypography.titleMedium),
+      ),
+    );
+  }
+
+  /// One scrollable page (so nothing overflows on small phones or when
+  /// the keyboard is open) that collects everything the coach
+  /// personalises on: goal, niche, experience and a name.
   Widget _buildOnboarding() {
+    final alreadySetUp = _streak > 0 ||
+        _points > 0 ||
+        _dailyChallenges.isNotEmpty ||
+        _completedChallenges.isNotEmpty ||
+        _contentIdeas.isNotEmpty;
+    const levels = [
+      ('beginner', 'Beginner', Icons.eco_rounded),
+      ('intermediate', 'Intermediate', Icons.trending_up_rounded),
+      ('advanced', 'Advanced', Icons.rocket_launch_rounded),
+    ];
+
     return Scaffold(
       backgroundColor: AppColors.bg,
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        title: const Text('Set up your coach'),
+      ),
       body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(AppSpacing.xl),
-          child: Column(
-            children: [
-              const Spacer(flex: 1),
-              Container(
-                width: 72,
-                height: 72,
-                decoration: BoxDecoration(
-                  gradient: AppColors.primaryGradient,
-                  borderRadius: BorderRadius.circular(AppRadius.xl),
-                  boxShadow: AppShadows.primary,
-                ),
-                child: const Icon(
-                  Icons.auto_awesome_rounded,
-                  color: Colors.white,
-                  size: 36,
-                ),
-              ),
-              const SizedBox(height: AppSpacing.lg),
-              const Text(
-                'Welcome to AI Coach',
-                style: AppTypography.displayMedium,
-              ),
-              const SizedBox(height: AppSpacing.sm),
-              const Text(
-                'Get personalized coaching and content ideas',
-                style: AppTypography.bodyMedium,
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: AppSpacing.xl),
-              const Text(
-                'What do you want to achieve?',
-                style: AppTypography.titleLarge,
-              ),
-              const SizedBox(height: AppSpacing.md),
-              Wrap(
-                spacing: AppSpacing.sm,
-                runSpacing: AppSpacing.sm,
-                children: CoachGoal.values.map((goal) {
-                  final isSelected = _selectedGoal == goal;
-                  return GestureDetector(
-                    onTap: () => setState(() => _selectedGoal = goal),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: AppSpacing.md,
-                        vertical: AppSpacing.sm,
-                      ),
-                      decoration: BoxDecoration(
-                        color: isSelected
-                            ? AppColors.primary.withValues(alpha: 0.12)
-                            : AppColors.surface,
-                        borderRadius: BorderRadius.circular(AppRadius.md),
-                        border: Border.all(
-                          color: isSelected
-                              ? AppColors.primary
-                              : AppColors.borderLight,
-                        ),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(goal.icon,
-                              color: isSelected
-                                  ? AppColors.primary
-                                  : AppColors.textMuted,
-                              size: 16),
-                          const SizedBox(width: 4),
-                          Text(
-                            goal.label,
-                            style: TextStyle(
-                              color: isSelected
-                                  ? AppColors.primary
-                                  : AppColors.textSecondary,
-                              fontSize: 13,
-                              fontWeight: isSelected
-                                  ? FontWeight.w600
-                                  : FontWeight.w400,
-                            ),
-                          ),
-                        ],
+        child: Column(
+          children: [
+            Expanded(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
+                child: Column(
+                  children: [
+                    const SizedBox(height: AppSpacing.sm),
+                    Text(
+                      'Your challenges, ideas and learning path are written '
+                      'for the answers you give here.',
+                      style: AppTypography.bodyMedium
+                          .copyWith(color: AppColors.textSecondary),
+                    ),
+                    _onboardingHeading('What do you want to achieve?'),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Wrap(
+                        spacing: AppSpacing.sm,
+                        runSpacing: AppSpacing.sm,
+                        children: CoachGoal.values
+                            .map((goal) => _selectChip(
+                                  label: goal.label,
+                                  icon: goal.icon,
+                                  selected: _selectedGoal == goal,
+                                  onTap: () =>
+                                      setState(() => _selectedGoal = goal),
+                                ))
+                            .toList(),
                       ),
                     ),
-                  );
-                }).toList(),
+                    _onboardingHeading('What\'s your niche?'),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Wrap(
+                        spacing: AppSpacing.sm,
+                        runSpacing: AppSpacing.sm,
+                        children: CoachNiche.values
+                            .map((niche) => _selectChip(
+                                  label: niche.label,
+                                  icon: niche.icon,
+                                  selected: _selectedNiche == niche,
+                                  onTap: () =>
+                                      setState(() => _selectedNiche = niche),
+                                ))
+                            .toList(),
+                      ),
+                    ),
+                    _onboardingHeading('How experienced are you?'),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Wrap(
+                        spacing: AppSpacing.sm,
+                        runSpacing: AppSpacing.sm,
+                        children: levels
+                            .map((level) => _selectChip(
+                                  label: level.$2,
+                                  icon: level.$3,
+                                  selected: _experienceLevel == level.$1,
+                                  onTap: () => setState(
+                                      () => _experienceLevel = level.$1),
+                                ))
+                            .toList(),
+                      ),
+                    ),
+                    _onboardingHeading('What should we call you?'),
+                    TextFormField(
+                      initialValue: _userName == 'Creator' ? '' : _userName,
+                      maxLength: 40,
+                      textCapitalization: TextCapitalization.words,
+                      decoration: const InputDecoration(
+                        hintText: 'Your name or brand',
+                        prefixIcon: Icon(Icons.person_rounded),
+                        counterText: '',
+                      ),
+                      onChanged: (value) => _userName =
+                          value.trim().isNotEmpty ? value.trim() : 'Creator',
+                    ),
+                    const SizedBox(height: AppSpacing.lg),
+                  ],
+                ),
               ),
-              const SizedBox(height: AppSpacing.lg),
-              const Text(
-                'What\'s your niche?',
-                style: AppTypography.titleLarge,
-              ),
-              const SizedBox(height: AppSpacing.md),
-              Container(
-                height: 150,
-                child: SingleChildScrollView(
-                  child: Wrap(
-                    spacing: AppSpacing.sm,
-                    runSpacing: AppSpacing.sm,
-                    children: CoachNiche.values.map((niche) {
-                      final isSelected = _selectedNiche == niche;
-                      return GestureDetector(
-                        onTap: () => setState(() => _selectedNiche = niche),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: AppSpacing.md,
-                            vertical: AppSpacing.sm,
-                          ),
-                          decoration: BoxDecoration(
-                            color: isSelected
-                                ? AppColors.primary.withValues(alpha: 0.12)
-                                : AppColors.surface,
-                            borderRadius: BorderRadius.circular(AppRadius.md),
-                            border: Border.all(
-                              color: isSelected
-                                  ? AppColors.primary
-                                  : AppColors.borderLight,
-                            ),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(niche.icon,
-                                  color: isSelected
-                                      ? AppColors.primary
-                                      : AppColors.textMuted,
-                                  size: 16),
-                              const SizedBox(width: 4),
-                              Text(
-                                niche.label,
-                                style: TextStyle(
-                                  color: isSelected
-                                      ? AppColors.primary
-                                      : AppColors.textSecondary,
-                                  fontSize: 13,
-                                  fontWeight: isSelected
-                                      ? FontWeight.w600
-                                      : FontWeight.w400,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      );
-                    }).toList(),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                  AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, AppSpacing.md),
+              child: Column(
+                children: [
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      onPressed: _savingProfile ? null : _saveOnboarding,
+                      child: Text(_savingProfile
+                          ? 'Saving...'
+                          : (alreadySetUp
+                              ? 'Save changes'
+                              : 'Start Your Journey 🚀')),
+                    ),
                   ),
-                ),
+                  if (alreadySetUp)
+                    TextButton(
+                      onPressed: _savingProfile
+                          ? null
+                          : () => setState(() => _isOnboarding = false),
+                      child: const Text('Cancel'),
+                    ),
+                ],
               ),
-              const SizedBox(height: AppSpacing.md),
-              TextField(
-                decoration: const InputDecoration(
-                  hintText: 'What should we call you?',
-                  prefixIcon: Icon(Icons.person_rounded),
-                ),
-                onChanged: (value) => setState(
-                    () => _userName = value.isNotEmpty ? value : 'Creator'),
-              ),
-              const Spacer(flex: 1),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  onPressed: _saveOnboarding,
-                  child: const Text('Start Your Journey 🚀'),
-                ),
-              ),
-              const SizedBox(height: AppSpacing.lg),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );
@@ -1389,6 +1635,8 @@ class _AIContentCoachState extends State<AIContentCoach>
     required IconData icon,
     required String title,
     required String description,
+    String? actionLabel,
+    VoidCallback? onAction,
   }) {
     return Center(
       child: Padding(
@@ -1407,6 +1655,13 @@ class _AIContentCoachState extends State<AIContentCoach>
               ),
               textAlign: TextAlign.center,
             ),
+            if (actionLabel != null && onAction != null) ...[
+              const SizedBox(height: AppSpacing.lg),
+              ElevatedButton(
+                onPressed: onAction,
+                child: Text(actionLabel),
+              ),
+            ],
           ],
         ),
       ),
@@ -1703,8 +1958,12 @@ class _IdeaCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final difficultyStars =
-        List.generate(5, (i) => i < (idea['difficulty'] as int? ?? 1));
+    final rawDifficulty = (idea['difficulty'] ?? '').toString().toLowerCase();
+    final difficulty = rawDifficulty.isEmpty ? 'easy' : rawDifficulty;
+    final Color difficultyColor = difficulty == 'hard'
+        ? AppColors.error
+        : (difficulty == 'medium' ? AppColors.warning : AppColors.success);
+    final hook = (idea['hook'] ?? '').toString().trim();
 
     return Container(
       padding: const EdgeInsets.all(AppSpacing.md),
@@ -1720,54 +1979,63 @@ class _IdeaCard extends StatelessWidget {
         children: [
           Row(
             children: [
+              Flexible(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: AppSpacing.sm,
+                    vertical: 2,
+                  ),
+                  decoration: BoxDecoration(
+                    color: AppColors.primary.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(
+                    (idea['format'] ?? 'Post').toString(),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: AppColors.primary,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: AppSpacing.sm),
               Container(
                 padding: const EdgeInsets.symmetric(
                   horizontal: AppSpacing.sm,
                   vertical: 2,
                 ),
                 decoration: BoxDecoration(
-                  color: AppColors.primary.withValues(alpha: 0.12),
+                  color: difficultyColor.withValues(alpha: 0.12),
                   borderRadius: BorderRadius.circular(4),
                 ),
                 child: Text(
-                  idea['format'] as String? ?? 'video',
-                  style: const TextStyle(
-                    color: AppColors.primary,
+                  difficulty[0].toUpperCase() + difficulty.substring(1),
+                  style: TextStyle(
+                    color: difficultyColor,
                     fontSize: 10,
                     fontWeight: FontWeight.w600,
                   ),
-                ),
-              ),
-              const SizedBox(width: AppSpacing.sm),
-              Row(
-                children: difficultyStars
-                    .map((_) => const Icon(Icons.star_rounded,
-                        color: AppColors.warning, size: 12))
-                    .toList(),
-              ),
-              const Spacer(),
-              Text(
-                '${idea['estimatedTime'] as int? ?? 10} min',
-                style: AppTypography.caption.copyWith(
-                  color: AppColors.textMuted,
                 ),
               ),
             ],
           ),
           const SizedBox(height: AppSpacing.sm),
           Text(
-            idea['title'] as String? ?? 'Content Idea',
+            (idea['title'] ?? 'Content idea').toString(),
             style: AppTypography.bodyMedium.copyWith(
               fontWeight: FontWeight.w700,
             ),
           ),
           Text(
-            idea['description'] as String? ?? '',
+            (idea['description'] ?? '').toString(),
             style: AppTypography.bodySmall.copyWith(
               color: AppColors.textSecondary,
             ),
           ),
-          if (idea['hook'] != null) ...[
+          if (hook.isNotEmpty) ...[
             const SizedBox(height: AppSpacing.sm),
             Container(
               padding: const EdgeInsets.all(AppSpacing.sm),
@@ -1778,18 +2046,35 @@ class _IdeaCard extends StatelessWidget {
               child: Row(
                 children: [
                   const Icon(
-                    Icons.link_rounded,
+                    Icons.format_quote_rounded,
                     color: AppColors.warning,
-                    size: 14,
+                    size: 16,
                   ),
                   const SizedBox(width: AppSpacing.sm),
                   Expanded(
                     child: Text(
-                      idea['hook'] as String,
+                      hook,
                       style: AppTypography.bodySmall.copyWith(
                         color: AppColors.textSecondary,
                         fontStyle: FontStyle.italic,
                       ),
+                    ),
+                  ),
+                  GestureDetector(
+                    onTap: () {
+                      Clipboard.setData(ClipboardData(text: hook));
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('Hook copied'),
+                          behavior: SnackBarBehavior.floating,
+                          duration: Duration(seconds: 2),
+                        ),
+                      );
+                    },
+                    child: const Padding(
+                      padding: EdgeInsets.only(left: AppSpacing.sm),
+                      child: Icon(Icons.copy_rounded,
+                          size: 16, color: AppColors.textMuted),
                     ),
                   ),
                 ],

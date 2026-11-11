@@ -319,7 +319,7 @@ class _PrivateVaultScreenState extends State<PrivateVaultScreen>
 
   Widget _buildLocked() {
     return Center(
-      child: Padding(
+      child: SingleChildScrollView(
         padding: const EdgeInsets.all(AppSpacing.xl),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -471,18 +471,21 @@ class _PrivateVaultScreenState extends State<PrivateVaultScreen>
             size: 16,
           ),
           const SizedBox(width: AppSpacing.sm),
-          Text(
-            _showFakeContent
-                ? '🔒 Decoy mode active'
-                : '${_files.length} protected file${_files.length > 1 ? "s" : ""}',
-            style: AppTypography.bodySmall.copyWith(
-              color: _showFakeContent
-                  ? AppColors.warning
-                  : AppColors.textSecondary,
-              fontWeight: FontWeight.w600,
+          Expanded(
+            child: Text(
+              _showFakeContent
+                  ? '🔒 Decoy mode active'
+                  : '${_files.length} protected file${_files.length == 1 ? "" : "s"}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: AppTypography.bodySmall.copyWith(
+                color: _showFakeContent
+                    ? AppColors.warning
+                    : AppColors.textSecondary,
+                fontWeight: FontWeight.w600,
+              ),
             ),
           ),
-          const Spacer(),
           if (!_showFakeContent)
             Row(
               children: [
@@ -592,7 +595,7 @@ class _PrivateVaultScreenState extends State<PrivateVaultScreen>
 
   Widget _buildEmptyVault() {
     return Center(
-      child: Padding(
+      child: SingleChildScrollView(
         padding: const EdgeInsets.all(AppSpacing.xl),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -636,9 +639,18 @@ class _PrivateVaultScreenState extends State<PrivateVaultScreen>
 
   Widget _buildVaultGrid() {
     return GridView.builder(
-      padding: const EdgeInsets.all(AppSpacing.sm),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 3,
+      // Bottom inset keeps the last row clear of the phone's navigation
+      // bar on edge-to-edge devices.
+      padding: EdgeInsets.fromLTRB(
+        AppSpacing.sm,
+        AppSpacing.sm,
+        AppSpacing.sm,
+        AppSpacing.sm + MediaQuery.of(context).padding.bottom,
+      ),
+      // Tiles are at most 140 wide: 3 columns on phones, more on wide
+      // screens / tablets, instead of 3 stretched tiles everywhere.
+      gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+        maxCrossAxisExtent: 140,
         crossAxisSpacing: 4,
         mainAxisSpacing: 4,
         childAspectRatio: 0.8,
@@ -1157,7 +1169,19 @@ class _PinPadState extends State<_PinPad> {
     return Scaffold(
       backgroundColor: AppColors.bg,
       body: SafeArea(
-        child: Padding(
+        // Fills the screen when there is room (same look as before) and
+        // scrolls when there isn't — small phones, large font sizes,
+        // split-screen — instead of overflowing off the bottom.
+        child: LayoutBuilder(
+          builder: (context, constraints) => SingleChildScrollView(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(minHeight: constraints.maxHeight),
+              child: IntrinsicHeight(
+                child: Center(
+                  // Keeps the keypad a comfortable width on tablets.
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 420),
+                    child: Padding(
           padding: const EdgeInsets.all(AppSpacing.xl),
           child: Column(
             children: [
@@ -1270,6 +1294,12 @@ class _PinPadState extends State<_PinPad> {
               ..._buildNumberPad(),
               const Spacer(flex: 1),
             ],
+          ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
           ),
         ),
       ),

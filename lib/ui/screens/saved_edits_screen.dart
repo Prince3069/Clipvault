@@ -9,6 +9,7 @@ import '../../models/media_file.dart';
 import '../../services/storage_service.dart';
 import '../themes/app_theme.dart';
 import '../widgets/media_viewer_screen.dart';
+import 'quick_editor_picker_screen.dart';
 
 class SavedEditsScreen extends StatefulWidget {
   const SavedEditsScreen({Key? key}) : super(key: key);
@@ -27,13 +28,33 @@ class _SavedEditsScreenState extends State<SavedEditsScreen> {
   @override
   void initState() {
     super.initState();
-    _loadEdits();
+    _loadEdits(openEditorIfEmpty: true);
   }
 
-  Future<void> _loadEdits() async {
-    setState(() => _isLoading = true);
-    _edits = await _storage.getSavedEdits();
-    setState(() => _isLoading = false);
+  /// [openEditorIfEmpty] is only set for the first load when the screen
+  /// opens: with nothing saved yet there is nothing to look at here, so
+  /// the person is taken straight to Quick Edit to make their first one.
+  /// (Later reloads — refresh, after deleting — stay on this screen.)
+  Future<void> _loadEdits({bool openEditorIfEmpty = false}) async {
+    if (mounted) setState(() => _isLoading = true);
+    final edits = await _storage.getSavedEdits();
+    if (!mounted) return;
+    if (openEditorIfEmpty && edits.isEmpty) {
+      _goToQuickEdit();
+      return;
+    }
+    setState(() {
+      _edits = edits;
+      _isLoading = false;
+    });
+  }
+
+  /// Replaces this screen with Quick Edit, so Back from the editor goes
+  /// to where the person came from rather than to an empty list.
+  void _goToQuickEdit() {
+    Navigator.of(context).pushReplacement(
+      MaterialPageRoute(builder: (_) => const QuickEditorPickerScreen()),
+    );
   }
 
   String _getEditIcon(String editType) {
@@ -387,6 +408,7 @@ class _SavedEditsScreenState extends State<SavedEditsScreen> {
             const SizedBox(height: 8),
             const Text(
               'Brand a photo with your price, name & logo and it will appear here',
+              textAlign: TextAlign.center,
               style: TextStyle(
                 color: AppColors.textSecondary,
                 fontSize: 14,
@@ -394,7 +416,7 @@ class _SavedEditsScreenState extends State<SavedEditsScreen> {
             ),
             const SizedBox(height: 24),
             ElevatedButton.icon(
-              onPressed: () => Navigator.pop(context),
+              onPressed: _goToQuickEdit,
               icon: const Icon(Icons.edit_rounded),
               label: const Text('Go to Quick Edit'),
               style: ElevatedButton.styleFrom(

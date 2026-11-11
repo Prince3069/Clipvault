@@ -44,6 +44,8 @@ const PRICE_PER_1M_OUTPUT_TOKENS_USD = 0.60;
 // costs are consistently much lower than this worst case, this can go back
 // up — but move it with real numbers in hand, not another guess.
 const AI_BUDGET_FRACTION = 0.30;
+// Monthly AI allowance for owner/producer test accounts.
+const OWNER_MONTHLY_BUDGET_USD = 25;
 
 // Credit packs get a LOWER fraction than subscriptions — not the same 30%.
 // Google Play changed its fee structure on June 30, 2026 (US/UK/EEA
@@ -209,7 +211,13 @@ async function getBudgetState(uid) {
   const spentUsd = currentAnchor === storedAnchor ? (budgetData.spentUsd || 0) : 0;
   const topUpBalanceUsd = budgetData.topUpBalanceUsd || 0;
 
-  const periodBudgetUsd = isPremium ? monthlyEquivalentPriceUsd * AI_BUDGET_FRACTION : 0;
+  // Owner/producer accounts (flag written only by middleware.js for the
+  // allow-listed, verified emails) get a fixed testing allowance instead
+  // of one derived from a subscription price they never paid.
+  const isOwner = userData.ownerAccess === true;
+  const periodBudgetUsd = isOwner
+    ? OWNER_MONTHLY_BUDGET_USD
+    : (isPremium ? monthlyEquivalentPriceUsd * AI_BUDGET_FRACTION : 0);
   const periodRemainingUsd = Math.max(0, periodBudgetUsd - spentUsd);
   const remainingUsd = periodRemainingUsd + topUpBalanceUsd;
 

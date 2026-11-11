@@ -29,6 +29,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../services/ai_service.dart';
 import '../../services/storage_service.dart';
 import '../themes/app_theme.dart';
+import 'premium_screen.dart';
 
 /// The four things that can go on a branded photo. Order here is display
 /// order for the toggle-chip row, not draw order (draw order is fixed:
@@ -62,10 +63,23 @@ class _ElementState {
 Map<_ElementKind, Offset> get _defaultPositions => {
       _ElementKind.name: const Offset(0.30, 0.08),
       _ElementKind.price: const Offset(0.82, 0.08),
-      _ElementKind.logo: const Offset(0.12, 0.92),
-      _ElementKind.cta: const Offset(0.30, 0.90),
-      _ElementKind.description: const Offset(0.68, 0.90),
+      // Bottom area is stacked (description above the call-to-action,
+      // both centred) and the logo sits under the price — the previous
+      // layout put logo, CTA and description side by side on one line,
+      // where they overlapped as soon as any of them had real text.
+      _ElementKind.logo: const Offset(0.86, 0.24),
+      _ElementKind.cta: const Offset(0.50, 0.92),
+      _ElementKind.description: const Offset(0.50, 0.78),
     };
+
+/// The bottom-row positions older versions used by default. A saved
+/// layout that still has exactly these is the old default, not something
+/// the person arranged, so it is upgraded to the non-overlapping one.
+const Map<_ElementKind, Offset> _legacyDefaultPositions = {
+  _ElementKind.logo: Offset(0.12, 0.92),
+  _ElementKind.cta: Offset(0.30, 0.90),
+  _ElementKind.description: Offset(0.68, 0.90),
+};
 
 class BrandOverlayEditor extends StatefulWidget {
   final String imagePath;
@@ -150,8 +164,16 @@ class _BrandOverlayEditorState extends State<BrandOverlayEditor> {
             final y = double.tryParse(fields[1]);
             final vis = fields[2] == '1';
             if (x != null && y != null) {
-              _elements[_ElementKind.values[i]] =
-                  _ElementState(position: Offset(x, y), visible: vis);
+              final kind = _ElementKind.values[i];
+              final legacy = _legacyDefaultPositions[kind];
+              final isLegacyDefault = legacy != null &&
+                  (legacy.dx - x).abs() < 0.001 &&
+                  (legacy.dy - y).abs() < 0.001;
+              _elements[kind] = _ElementState(
+                position:
+                    isLegacyDefault ? _defaultPositions[kind]! : Offset(x, y),
+                visible: vis,
+              );
             }
           }
         }
@@ -235,8 +257,11 @@ class _BrandOverlayEditorState extends State<BrandOverlayEditor> {
 
     if (gate['allowed'] != true) {
       if (!mounted) return;
-      _showPaywall(gate['reason']?.toString() ??
-          'You have used your allowance for this feature.');
+      _showPaywall(
+        gate['reason']?.toString() ??
+            'You have used your allowance for this feature.',
+        offerUpgrade: gate['tier'] == 'free',
+      );
       return;
     }
 
@@ -319,39 +344,64 @@ class _BrandOverlayEditorState extends State<BrandOverlayEditor> {
     return byteData?.buffer.asUint8List();
   }
 
-  void _showPaywall(String reason) {
+  void _showPaywall(String reason, {bool offerUpgrade = false}) {
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.white,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      builder: (_) => Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text('Out of uses for now',
-                style: TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.w800,
-                    color: AppColors.textPrimary)),
-            const SizedBox(height: 8),
-            Text(reason,
-                style: const TextStyle(
-                    color: AppColors.textSecondary, height: 1.4)),
-            const SizedBox(height: 20),
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton(
-                onPressed: () => Navigator.of(context).pop(),
-                style:
-                    FilledButton.styleFrom(backgroundColor: AppColors.primary),
-                child: const Text('Got it'),
+      // SafeArea keeps the buttons above the phone's navigation bar.
+      builder: (sheetContext) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(24, 24, 24, 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Out of uses for now',
+                  style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.w800,
+                      color: AppColors.textPrimary)),
+              const SizedBox(height: 8),
+              Text(reason,
+                  style: const TextStyle(
+                      color: AppColors.textSecondary, height: 1.4)),
+              const SizedBox(height: 20),
+              if (offerUpgrade) ...[
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton(
+                    onPressed: () {
+                      Navigator.of(sheetContext).pop();
+                      Navigator.of(context).push(MaterialPageRoute(
+                        builder: (_) => const PremiumScreen(),
+                      ));
+                    },
+                    style: FilledButton.styleFrom(
+                        backgroundColor: AppColors.primary),
+                    child: const Text('Upgrade to Pro'),
+                  ),
+                ),
+                const SizedBox(height: 8),
+              ],
+              SizedBox(
+                width: double.infinity,
+                child: offerUpgrade
+                    ? TextButton(
+                        onPressed: () => Navigator.of(sheetContext).pop(),
+                        child: const Text('Not now'),
+                      )
+                    : FilledButton(
+                        onPressed: () => Navigator.of(sheetContext).pop(),
+                        style: FilledButton.styleFrom(
+                            backgroundColor: AppColors.primary),
+                        child: const Text('Got it'),
+                      ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -372,6 +422,15 @@ class _BrandOverlayEditorState extends State<BrandOverlayEditor> {
         title: const Text('Brand Overlay'),
         backgroundColor: Colors.black,
         foregroundColor: Colors.white,
+        // The app theme pins the title to a dark colour, which is
+        // unreadable on this screen's black bar.
+        titleTextStyle: const TextStyle(
+          color: Colors.white,
+          fontSize: 17,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 0.2,
+        ),
+        iconTheme: const IconThemeData(color: Colors.white),
         actions: [
           TextButton(
             onPressed: _resetToDefault,

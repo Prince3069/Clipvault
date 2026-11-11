@@ -753,8 +753,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   Widget _buildCommandGrid() {
     return Column(
       children: [
-        Row(
-          children: [
+        // IntrinsicHeight + stretch: both tiles in a row always share
+        // the taller one's height, whatever the text length or font size.
+        IntrinsicHeight(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
             Expanded(
                 child: _commandTile(
                     'Repurpose',
@@ -770,11 +774,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     Icons.dashboard_customize_rounded,
                     _cyan,
                     () => _open(const CreatorLibraryScreen()))),
-          ],
+            ],
+          ),
         ),
         const SizedBox(height: 12),
-        Row(
-          children: [
+        // IntrinsicHeight + stretch: both tiles in a row always share
+        // the taller one's height, whatever the text length or font size.
+        IntrinsicHeight(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
             Expanded(
                 child: _commandTile(
                     'Translate',
@@ -790,11 +799,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     Icons.tune_rounded,
                     const Color(0xFF8E75E8),
                     _openEditor)),
-          ],
+            ],
+          ),
         ),
         const SizedBox(height: 12),
-        Row(
-          children: [
+        // IntrinsicHeight + stretch: both tiles in a row always share
+        // the taller one's height, whatever the text length or font size.
+        IntrinsicHeight(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
             Expanded(
                 child: _commandTile(
                     'Private Vault',
@@ -810,11 +824,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     Icons.track_changes_rounded,
                     const Color(0xFFB39AFF),
                     () => _open(const AIContentCoach()))),
-          ],
+            ],
+          ),
         ),
         const SizedBox(height: 12),
-        Row(
-          children: [
+        // IntrinsicHeight + stretch: both tiles in a row always share
+        // the taller one's height, whatever the text length or font size.
+        IntrinsicHeight(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
             Expanded(
                 child: _commandTile(
                     'Saved Edits',
@@ -830,7 +849,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     Icons.cloud_rounded,
                     const Color(0xFF3B82F6),
                     () => _open(const CloudVaultScreen()))),
-          ],
+            ],
+          ),
         ),
       ],
     );
@@ -870,6 +890,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 style:
                     const TextStyle(color: _muted, fontSize: 10, height: 1.25)),
             const SizedBox(height: 12),
+            // Pushes "Open" to the bottom edge so it lines up across the
+            // row even when one tile's description is a line shorter.
+            const Spacer(),
             Row(
               children: [
                 Text('Open',

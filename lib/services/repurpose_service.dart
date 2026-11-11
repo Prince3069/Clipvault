@@ -19,6 +19,13 @@ class VariantResult {
   final String? error;
   final int? remainingCredits;
   final String? tone; // echoes back which tone was used, if any
+  /// True when the server wrote from the video's real speech/content,
+  /// false when it only had the title to go on.
+  final bool usedTranscript;
+  /// True when the failure means "buy credits / wait for renewal".
+  final bool outOfBudget;
+  /// True when the failure means "this needs Pro".
+  final bool needsUpgrade;
 
   const VariantResult({
     required this.success,
@@ -26,6 +33,9 @@ class VariantResult {
     this.error,
     this.remainingCredits,
     this.tone,
+    this.usedTranscript = false,
+    this.outOfBudget = false,
+    this.needsUpgrade = false,
   });
 
   bool get isEmpty => variants.isEmpty;
@@ -51,6 +61,7 @@ class RepurposeService {
     String? platform,
     String? analysisKey,
     String? tone,
+    String? targetLanguage,
   }) async {
     try {
       final token = await _getIdToken();
@@ -69,29 +80,40 @@ class RepurposeService {
               if (analysisKey != null && analysisKey.isNotEmpty)
                 'analysisKey': analysisKey,
               if (tone != null && tone.isNotEmpty) 'tone': tone,
+              if (targetLanguage != null && targetLanguage.isNotEmpty)
+                'targetLanguage': targetLanguage,
             }),
           )
-          .timeout(const Duration(seconds: 45));
+          .timeout(const Duration(seconds: 60));
 
-      if (response.statusCode == 402) {
-        final data = jsonDecode(response.body);
-        return VariantResult(
-          success: false,
-          error: data['error'] ?? 'Upgrade to Pro to use Repurpose Studio',
-        );
-      }
-      if (response.statusCode == 429) {
-        final data = jsonDecode(response.body);
-        return VariantResult(
-          success: false,
-          error: data['error'] ??
-              'Your AI budget is used up. Buy credits to keep going.',
-        );
-      }
       if (response.statusCode != 200) {
+        String? serverError;
+        bool rateLimited = false;
+        try {
+          final body = jsonDecode(response.body);
+          if (body is Map) {
+            serverError = body['error']?.toString();
+            rateLimited = body['rateLimited'] == true;
+          }
+        } catch (_) {}
+        if (response.statusCode == 402) {
+          return VariantResult(
+            success: false,
+            needsUpgrade: true,
+            error: serverError ?? 'Upgrade to Pro to use Repurpose Studio',
+          );
+        }
+        if (response.statusCode == 429) {
+          return VariantResult(
+            success: false,
+            outOfBudget: !rateLimited,
+            error: serverError ??
+                'Your AI budget is used up. Buy credits to keep going.',
+          );
+        }
         return VariantResult(
           success: false,
-          error: 'Something went wrong (${response.statusCode}).',
+          error: serverError ?? 'Something went wrong (${response.statusCode}).',
         );
       }
 
@@ -105,8 +127,9 @@ class RepurposeService {
       return VariantResult(
         success: true,
         variants: variants,
-        remainingCredits: data['remainingCredits'] as int?,
+        remainingCredits: (data['remainingCredits'] as num?)?.toInt(),
         tone: data['tone'] as String?,
+        usedTranscript: data['usedTranscript'] == true,
       );
     } catch (e) {
       debugPrint('processActionVariants error: $e');

@@ -580,6 +580,29 @@ class _CloudVaultScreenState extends State<CloudVaultScreen>
   }
 
   Widget _buildThumbnail(CloudFile file, bool isVideo) {
+    // Videos uploaded before previews existed have no picture to show —
+    // draw a clean video tile instead of a broken-image icon.
+    if (!file.hasImageThumbnail) {
+      return Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              AppColors.primary.withValues(alpha: 0.18),
+              AppColors.primary.withValues(alpha: 0.06),
+            ],
+          ),
+        ),
+        child: Center(
+          child: Icon(
+            isVideo ? Icons.movie_rounded : Icons.image_outlined,
+            color: AppColors.primary,
+            size: 30,
+          ),
+        ),
+      );
+    }
     return CachedNetworkImage(
       imageUrl: file.thumbnailUrl,
       fit: BoxFit.cover,
@@ -606,66 +629,46 @@ class _CloudVaultScreenState extends State<CloudVaultScreen>
     );
   }
 
-  void _openFile(CloudFile file) async {
-    final mediaFile = MediaFile(
+  Future<void> _openFile(CloudFile file) async {
+    final provider = Provider.of<CloudVaultProvider>(context, listen: false);
+    if (provider.isDownloading || provider.isUploading) return;
+
+    // The progress strip at the top of the vault shows how far along the
+    // download is; the file is opened as soon as it is on the phone.
+    final localPath = await provider.fetchForViewing(file);
+    if (!mounted) return;
+
+    if (localPath == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(provider.error ?? 'Could not open this file'),
+          backgroundColor: AppColors.error,
+        ),
+      );
+      return;
+    }
+
+    final viewable = MediaFile(
       id: file.id,
-      path: file.storagePath,
+      path: localPath,
       fileName: file.fileName,
       fileSize: file.fileSize,
       isVideo: file.isVideo,
       sourceApp: 'cloud',
       createdAt: file.uploadDate,
       viewedAt: DateTime.now(),
-      isDownloaded: false,
+      isDownloaded: true,
     );
 
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => const Center(
-        child: CircularProgressIndicator(color: AppColors.primary),
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => MediaViewerScreen(
+          mediaFiles: [viewable],
+          initialIndex: 0,
+        ),
       ),
     );
-
-    try {
-      final provider = Provider.of<CloudVaultProvider>(context, listen: false);
-      final result = await provider.downloadFile(file);
-
-      Navigator.pop(context);
-
-      if (result != null) {
-        final downloadedFile = MediaFile(
-          id: file.id,
-          path: result,
-          fileName: file.fileName,
-          fileSize: file.fileSize,
-          isVideo: file.isVideo,
-          sourceApp: 'cloud',
-          createdAt: file.uploadDate,
-          viewedAt: DateTime.now(),
-          isDownloaded: true,
-        );
-
-        Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (_) => MediaViewerScreen(
-              mediaFiles: [downloadedFile],
-              initialIndex: 0,
-            ),
-          ),
-        );
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Failed to load file')),
-        );
-      }
-    } catch (e) {
-      Navigator.pop(context);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error: $e')),
-      );
-    }
   }
 
   void _showItemOptions(CloudFile file, CloudVaultProvider provider) {
@@ -766,14 +769,14 @@ class _CloudVaultScreenState extends State<CloudVaultScreen>
     if (result != null && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('✅ File downloaded to device'),
+          content: Text('✅ Saved to your phone'),
           backgroundColor: AppColors.success,
         ),
       );
     } else if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('❌ Download failed'),
+        SnackBar(
+          content: Text('❌ ${provider.error ?? 'Download failed'}'),
           backgroundColor: AppColors.error,
         ),
       );
@@ -938,7 +941,8 @@ class _CloudVaultScreenState extends State<CloudVaultScreen>
         localPath: file.path,
         fileName: fileName,
         source: 'manual',
-        mimeType: picked.mimeType ?? 'image/jpeg',
+        mimeType: picked.mimeType,
+        expectVideo: false,
       );
 
       if (!mounted) return;
@@ -998,7 +1002,8 @@ class _CloudVaultScreenState extends State<CloudVaultScreen>
         localPath: picked.path,
         fileName: picked.name,
         source: 'manual',
-        mimeType: picked.mimeType ?? 'video/mp4',
+        mimeType: picked.mimeType,
+        expectVideo: true,
       );
 
       if (!mounted) return;

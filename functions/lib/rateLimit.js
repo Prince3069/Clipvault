@@ -27,6 +27,8 @@ const BUCKETS = {
   detectLanguage: { capacity: 30, refillPerSecond: 1 },
   getDailyChallenge: { capacity: 10, refillPerSecond: 0.05 },
   analyzeVideo: { capacity: 5, refillPerSecond: 0.05 },
+  getCoachIdeas: { capacity: 6, refillPerSecond: 0.02 },
+  getCoachPlan: { capacity: 6, refillPerSecond: 0.02 },
 };
 
 /**

@@ -94,7 +94,7 @@ class _RepurposeStudioScreenState extends State<RepurposeStudioScreen> {
                 ),
                 SizedBox(height: 8),
                 Text(
-                  'Choose a saved download or a video from your phone. Local Quick Packs are free; AI actions use your AI allowance.',
+                  'Choose a saved download or a video from your phone. The Quick Pack templates are free; AI tools read what is said in the video and use your AI allowance.',
                   style: TextStyle(color: Colors.white70, height: 1.4),
                 ),
               ],
@@ -182,6 +182,8 @@ class _RepurposeStudioScreenState extends State<RepurposeStudioScreen> {
         ),
         const SizedBox(height: 14),
         RepurposeStudio(
+          // A fresh studio (and fresh analysis state) per video.
+          key: ValueKey(item.path),
           videoId: item.id,
           videoTitle: item.fileName,
           videoPath: item.path,

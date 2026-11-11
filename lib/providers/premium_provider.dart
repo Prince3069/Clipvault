@@ -26,7 +26,24 @@ class PremiumProvider extends ChangeNotifier {
   static const _kTrialUsed = 'trial_used';
   static const _kPurchaseToken = 'purchase_token';
 
+  /// Owner/producer accounts — always Pro, in every build, so the people
+  /// shipping the app can test Pro features on the live Play Store
+  /// version. The server enforces the same list independently (see
+  /// functions/lib/middleware.js OWNER_EMAILS); this copy only unlocks
+  /// the UI instantly without waiting on the network.
+  static const Set<String> ownerEmails = {
+    'princenwanozie6666@gmail.com',
+    'ifeanyinwanozie6666@gmail.com',
+  };
+
   bool _isPremium = false;
+  // True when the signed-in account is one of [ownerEmails].
+  bool _ownerAccess = false;
+  // True when the SERVER says this account is Pro (its premiumExpiry in
+  // Firestore is in the future) even if this device's local cache
+  // doesn't know it yet — e.g. after a reinstall or on a second phone.
+  bool _serverPremium = false;
+  StreamSubscription<User?>? _authSub;
   PurchasePlan? _plan;
   DateTime? _expiry;
   int _downloadsToday = 0;
@@ -44,14 +61,15 @@ class PremiumProvider extends ChangeNotifier {
 
   final PurchaseService _purchaseService = PurchaseService();
 
-  bool get isPremium => _isPremium;
-  bool get isFree => !_isPremium;
+  bool get isPremium => _isPremium || _ownerAccess || _serverPremium;
+  bool get isFree => !isPremium;
+  bool get isOwnerAccount => _ownerAccess;
   PurchasePlan? get plan => _plan;
   DateTime? get expiry => _expiry;
   int get downloadsToday => _downloadsToday;
   int get remainingDownloads =>
       (kFreeDailyLimit - _downloadsToday).clamp(0, kFreeDailyLimit);
-  bool get canDownload => _isPremium || _downloadsToday < kFreeDailyLimit;
+  bool get canDownload => isPremium || _downloadsToday < kFreeDailyLimit;
   bool get trialUsed => _trialUsed;
   bool get isLoading => _isLoading;
   bool get purchaseInProgress => _purchaseInProgress;
@@ -64,7 +82,8 @@ class PremiumProvider extends ChangeNotifier {
 
   // Plan label — if/else instead of switch expression
   String get planLabel {
-    if (!_isPremium) return 'Free';
+    if (!isPremium) return 'Free';
+    if (_ownerAccess) return 'Owner';
     if (_plan == PurchasePlan.monthly) return 'Monthly';
     if (_plan == PurchasePlan.annual) return 'Annual';
     return 'Premium';
@@ -74,6 +93,13 @@ class PremiumProvider extends ChangeNotifier {
     _isLoading = true;
     notifyListeners();
     await _loadFromPrefs();
+
+    // Re-check entitlement whenever the signed-in account changes (sign
+    // in, sign out, anonymous → Google link). Fires once immediately with
+    // the current user, so this also covers plain app start.
+    _authSub ??= FirebaseAuth.instance.userChanges().listen((user) {
+      _syncAccountEntitlement(user);
+    });
 
     await _purchaseService.initialize(
       onPurchaseUpdate: _handlePurchaseUpdate,
@@ -109,6 +135,70 @@ class PremiumProvider extends ChangeNotifier {
     _purchaseService.restorePurchases().catchError((e) {
       print('Startup entitlement check skipped: $e');
     });
+  }
+
+  static bool _isOwnerUser(User? user) {
+    if (user == null) return false;
+    final email = (user.email ?? '').trim().toLowerCase();
+    if (email.isEmpty || !ownerEmails.contains(email)) return false;
+    // Must be a verified address — Google sign-in always is.
+    return user.emailVerified ||
+        user.providerData.any((p) => p.providerId == 'google.com');
+  }
+
+  String? _lastSyncedUid;
+  bool _syncInFlight = false;
+
+  /// Works out whether the signed-in account is entitled to Pro without a
+  /// local purchase record: an owner account, or an account the server
+  /// already knows is subscribed.
+  Future<void> _syncAccountEntitlement(User? user) async {
+    final owner = _isOwnerUser(user);
+    final uidChanged = user?.uid != _lastSyncedUid;
+    if (owner != _ownerAccess || (uidChanged && _serverPremium)) {
+      _ownerAccess = owner;
+      if (uidChanged) _serverPremium = false;
+      notifyListeners();
+    }
+    if (user == null) {
+      _lastSyncedUid = null;
+      return;
+    }
+    if (_syncInFlight) return;
+    if (!uidChanged) return; // already asked the server for this account
+    _syncInFlight = true;
+    try {
+      final idToken = await user.getIdToken();
+      if (idToken == null) return;
+      final response = await http.get(
+        Uri.parse('$_functionsBaseUrl/verifyPremium'),
+        headers: {'Authorization': 'Bearer $idToken'},
+      ).timeout(const Duration(seconds: 20));
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
+        final serverPremium = data['isPremium'] == true;
+        final serverOwner = data['isOwner'] == true;
+        _lastSyncedUid = user.uid;
+        if (serverPremium != _serverPremium ||
+            (serverOwner && !_ownerAccess)) {
+          _serverPremium = serverPremium;
+          if (serverOwner) _ownerAccess = true;
+          notifyListeners();
+        }
+        if (serverPremium) refreshCreditBalance();
+      }
+    } catch (e) {
+      print('Entitlement sync skipped: $e');
+    } finally {
+      _syncInFlight = false;
+    }
+  }
+
+  /// Lets a screen force a fresh entitlement check (e.g. right after the
+  /// person links their Google account).
+  Future<void> refreshEntitlement() async {
+    _lastSyncedUid = null;
+    await _syncAccountEntitlement(FirebaseAuth.instance.currentUser);
   }
 
   Future<void> _loadFromPrefs() async {
@@ -149,7 +239,7 @@ class PremiumProvider extends ChangeNotifier {
   String _today() => DateTime.now().toIso8601String().substring(0, 10);
 
   Future<void> recordDownload() async {
-    if (_isPremium) return;
+    if (isPremium) return;
     _downloadsToday++;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_kDlDate, _today());
@@ -273,7 +363,7 @@ class PremiumProvider extends ChangeNotifier {
   /// rule independently in /redeemCreditPurchase — this is the fast,
   /// friendly check, not the only one.
   Future<void> buyCreditPack(String productId) async {
-    if (!_isPremium) {
+    if (!isPremium) {
       _errorMessage = 'Credits top up your Pro AI allowance — subscribe to '
           'Pro first, then you can buy credits any time you need more.';
       notifyListeners();
@@ -453,6 +543,7 @@ class PremiumProvider extends ChangeNotifier {
 
   @override
   void dispose() {
+    _authSub?.cancel();
     _purchaseService.dispose();
     super.dispose();
   }

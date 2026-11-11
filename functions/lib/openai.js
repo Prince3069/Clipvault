@@ -4,13 +4,15 @@
 
 /**
  * @param {string} apiKey
- * @param {{system: string, user: string, temperature?: number, model?: string}} opts
+ * @param {{system: string, user: string, temperature?: number, model?: string, json?: boolean}} opts
+ *   json: true asks the model for a single JSON object (the prompt must
+ *   mention JSON), which is far more reliable to parse than free text.
  * @returns {Promise<{text: string, usage: object|null}>} the model's reply
  *   plus the token usage OpenAI reports — usage is what budget.js needs to
  *   compute real cost, so every caller should hang onto it and pass it to
  *   recordSpend() after the call.
  */
-async function chatComplete(apiKey, {system, user, temperature = 0.4, model = "gpt-4o-mini"}) {
+async function chatComplete(apiKey, {system, user, temperature = 0.4, model = "gpt-4o-mini", json = false}) {
   const response = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -24,6 +26,7 @@ async function chatComplete(apiKey, {system, user, temperature = 0.4, model = "g
         {role: "user", content: user},
       ],
       temperature,
+      ...(json ? {response_format: {type: "json_object"}} : {}),
     }),
   });
 

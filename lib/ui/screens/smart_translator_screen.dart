@@ -22,6 +22,7 @@ import '../../providers/premium_provider.dart';
 import '../../providers/download_provider.dart';
 import '../themes/app_theme.dart';
 import '../../services/storage_service.dart';
+import 'premium_screen.dart';
 
 // ─── Language Model ──────────────────────────────────────────────────────
 
@@ -75,6 +76,21 @@ class Language {
     return supported.firstWhere((l) => l.code == code,
         orElse: () => supported.first);
   }
+
+  /// Matches either a language code ("es") or an English language name
+  /// ("Spanish", "spanish") — the server's detectors answer with names.
+  /// Returns null when nothing matches.
+  static Language? match(String? value) {
+    final v = (value ?? '').trim().toLowerCase();
+    if (v.isEmpty) return null;
+    for (final l in supported) {
+      if (l.code == v || l.name.toLowerCase() == v) return l;
+    }
+    for (final l in supported) {
+      if (v.startsWith(l.name.toLowerCase())) return l;
+    }
+    return null;
+  }
 }
 
 // ─── Screen ──────────────────────────────────────────────────────────────
@@ -120,6 +136,15 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
   String? _pickedVideoTitle;
   bool _isPickingVideo = false;
   bool _transcriptTruncated = false;
+  // Real timed lines from the video's speech ({start, end, text}), used
+  // for accurate .srt export.
+  List<Map<String, dynamic>> _videoSegments = [];
+  // True while _transcript holds speech pulled from a video (source
+  // language is then auto-detected, not taken from the picker).
+  bool _transcriptFromVideo = false;
+  // False when the video's spoken language isn't one in our list — the
+  // translator is then left to detect it by itself.
+  bool _videoLanguageKnown = false;
 
   // ─── Language Selection ──────────────────────────────────────────────
   Language _sourceLanguage = Language.supported.first;
@@ -230,10 +255,13 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
 
     try {
       final detected = await _ai.detectLanguage(_transcript);
+      if (!mounted) return;
+      final matched = Language.match(detected);
       setState(() {
-        _detectedLanguage = detected;
-        _sourceLanguage =
-            Language.fromCode(detected) ?? Language.supported.first;
+        if (matched != null) {
+          _detectedLanguage = matched.code;
+          _sourceLanguage = matched;
+        }
         _isProcessing = false;
         _status = '';
       });
@@ -263,6 +291,8 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
     _textController.clear();
     setState(() {
       _isListening = true;
+      _transcriptFromVideo = false;
+      _videoSegments = [];
       _transcript = '';
       _translation = '';
       _error = '';
@@ -316,9 +346,12 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
       setState(() => _error = 'No text to translate');
       return;
     }
-    if (_sourceLanguage.code == _targetLanguage.code) {
-      setState(
-          () => _error = 'Choose a different target language to translate.');
+    final autoSource = _transcriptFromVideo && !_videoLanguageKnown;
+    if (!autoSource && _sourceLanguage.code == _targetLanguage.code) {
+      setState(() => _error = _transcriptFromVideo
+          ? 'This video is already in ${_targetLanguage.name}. Choose a '
+              'different target language to translate.'
+          : 'Choose a different target language to translate.');
       return;
     }
 
@@ -350,17 +383,17 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
     });
 
     try {
-      for (int i = 0; i <= 10; i++) {
-        await Future.delayed(const Duration(milliseconds: 100));
-        if (mounted) setState(() => _progress = i / 10);
-      }
+      if (mounted) setState(() => _progress = 0.3);
 
+      // Language NAMES, not codes — the translator follows "Translate to
+      // Spanish" far more reliably than "Translate to es".
       final translation = await _ai.translateText(
         text: textToTranslate,
-        targetLanguage: _targetLanguage.code,
-        sourceLanguage: _sourceLanguage.code,
+        targetLanguage: _targetLanguage.name,
+        sourceLanguage: autoSource ? null : _sourceLanguage.name,
       );
 
+      if (!mounted) return;
       setState(() {
         _translation = translation;
         _showTranslation = true;
@@ -505,6 +538,8 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
       _translation = '';
       _showTranslation = false;
       _transcriptTruncated = false;
+      _videoSegments = [];
+      _transcriptFromVideo = false;
     });
 
     try {
@@ -522,10 +557,12 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
           _isProcessing = false;
           _progress = 0;
           _status = '';
-          _error = 'Could not analyze this video. It may be too large '
-              '(over 24MB), a format the analyzer can\'t read, or the '
-              'upload was interrupted.';
+          // The real reason from the server / upload — not a guess.
+          _error = _ai.lastAnalysisError ??
+              'Could not read this video. Please try again.';
         });
+        Provider.of<PremiumProvider>(context, listen: false)
+            .refreshCreditBalance();
         return;
       }
 
@@ -542,24 +579,40 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
         return;
       }
 
+      final segments = <Map<String, dynamic>>[];
+      final rawSegments = result['segments'];
+      if (rawSegments is List) {
+        for (final seg in rawSegments) {
+          if (seg is Map) segments.add(Map<String, dynamic>.from(seg));
+        }
+      }
+      final spoken = Language.match(result['language'] as String?);
+
       setState(() {
         _transcript = transcript;
         _textController.text = transcript;
+        _videoSegments = segments;
+        _transcriptFromVideo = true;
+        _videoLanguageKnown = spoken != null;
+        if (spoken != null) {
+          _sourceLanguage = spoken;
+          _detectedLanguage = spoken.code;
+        }
         _isProcessing = false;
         _progress = 1.0;
         _status = '';
       });
 
-      await _ai.trackEvent('video_transcription', properties: {
+      _ai.trackEvent('video_transcription', properties: {
         'video_title': _pickedVideoTitle ?? 'unknown',
         'transcript_length': transcript.length,
         'is_premium': isPremium,
       });
 
-      if (mounted) {
-        Provider.of<PremiumProvider>(context, listen: false)
-            .refreshCreditBalance();
-      }
+      // "Extract & Translate" does both: go straight on to translating.
+      // If the video is already in the target language, _translate()
+      // says so and the transcript stays on screen.
+      await _translate();
     } catch (e) {
       if (!mounted) return;
       final message = e.toString().replaceFirst('Exception: ', '');
@@ -576,7 +629,7 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
   void _tickProgress() {
     Future<void> ticker() async {
       for (int i = 0; i < 18; i++) {
-        await Future.delayed(const Duration(milliseconds: 400));
+        await Future.delayed(const Duration(milliseconds: 1500));
         if (!mounted || !_isProcessing) return;
         if (_progress >= 0.9) return;
         setState(() {
@@ -661,21 +714,62 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
     }
   }
 
+  String _srtTime(double seconds) {
+    final ms = (seconds * 1000).round().clamp(0, 359999999);
+    final h = (ms ~/ 3600000).toString().padLeft(2, '0');
+    final m = ((ms % 3600000) ~/ 60000).toString().padLeft(2, '0');
+    final sec = ((ms % 60000) ~/ 1000).toString().padLeft(2, '0');
+    final milli = (ms % 1000).toString().padLeft(3, '0');
+    return '$h:$m:$sec,$milli';
+  }
+
   String _generateSRT() {
-    final text = _showTranslation ? _translation : _transcript;
-    final lines = text.split(RegExp(r'[\n.!?]+'));
     final srt = StringBuffer();
 
-    var i = 0;
-    for (final raw in lines) {
-      final line = raw.trim();
-      if (line.isEmpty) continue;
+    // Original-language subtitles from a video: use the REAL timings.
+    if (!_showTranslation && _transcriptFromVideo && _videoSegments.isNotEmpty) {
+      var n = 1;
+      for (final seg in _videoSegments) {
+        final text = (seg['text'] ?? '').toString().trim();
+        if (text.isEmpty) continue;
+        final start = (seg['start'] as num?)?.toDouble() ?? 0;
+        final rawEnd = (seg['end'] as num?)?.toDouble() ?? (start + 2);
+        final end = rawEnd > start ? rawEnd : start + 2;
+        srt.writeln(n);
+        srt.writeln('${_srtTime(start)} --> ${_srtTime(end)}');
+        srt.writeln(text);
+        srt.writeln();
+        n++;
+      }
+      return srt.toString();
+    }
+
+    final text = _showTranslation ? _translation : _transcript;
+    final lines = text
+        .split(RegExp(r'(?<=[.!?。！？])\s+|\n+'))
+        .map((l) => l.trim())
+        .where((l) => l.isNotEmpty)
+        .toList();
+    if (lines.isEmpty) return '';
+
+    // Translated subtitles: spread the lines across the video's real
+    // length when it is known, otherwise pace them by reading speed.
+    double total = 0;
+    if (_transcriptFromVideo && _videoSegments.isNotEmpty) {
+      total = (_videoSegments.last['end'] as num?)?.toDouble() ?? 0;
+    }
+    final totalChars = lines.fold<int>(0, (sum, l) => sum + l.length);
+    var cursor = 0.0;
+    for (var i = 0; i < lines.length; i++) {
+      final line = lines[i];
+      final duration = total > 0 && totalChars > 0
+          ? total * (line.length / totalChars)
+          : (line.length / 15).clamp(1.5, 7.0).toDouble();
       srt.writeln(i + 1);
-      srt.writeln('00:00:${(i * 3).toString().padLeft(2, '0')},000 --> '
-          '00:00:${((i + 1) * 3).toString().padLeft(2, '0')},000');
+      srt.writeln('${_srtTime(cursor)} --> ${_srtTime(cursor + duration)}');
       srt.writeln(line);
       srt.writeln();
-      i++;
+      cursor += duration;
     }
 
     return srt.toString();
@@ -725,7 +819,12 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(
-                  onPressed: () => Navigator.pop(context),
+                  onPressed: () {
+                    Navigator.pop(context);
+                    Navigator.of(context).push(MaterialPageRoute(
+                      builder: (_) => const PremiumScreen(),
+                    ));
+                  },
                   child: const Text('Upgrade to Pro'),
                 ),
               ),
@@ -802,6 +901,8 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
                       setState(() {
                         if (isSource) {
                           _sourceLanguage = lang;
+                          // A manual choice overrides auto-detection.
+                          _videoLanguageKnown = true;
                           _detectedLanguage = lang.code;
                         } else {
                           _targetLanguage = lang;
@@ -1038,6 +1139,8 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
                       onChanged: (value) {
                         setState(() {
                           _transcript = value;
+                          _transcriptFromVideo = false;
+                          _videoSegments = [];
                           _showTranslation = false;
                           _translation = '';
                         });
@@ -1454,6 +1557,7 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
 
   Widget _buildVideoTab() {
     final hasVideo = _pickedVideoPath != null && _pickedVideoPath!.isNotEmpty;
+    final isPremium = context.watch<PremiumProvider>().isPremium;
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(AppSpacing.md),
@@ -1461,6 +1565,44 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
         children: [
           _buildLanguageSelector(),
           const SizedBox(height: AppSpacing.md),
+
+          // Say up front that this tab is Pro — before the person picks a
+          // video and taps a button that only opens an upgrade sheet.
+          if (!isPremium) ...[
+            GestureDetector(
+              onTap: _showPremiumDialog,
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(AppSpacing.md),
+                decoration: BoxDecoration(
+                  color: AppColors.primary.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(AppRadius.md),
+                  border: Border.all(
+                    color: AppColors.primary.withValues(alpha: 0.25),
+                  ),
+                ),
+                child: const Row(
+                  children: [
+                    Icon(Icons.workspace_premium_rounded,
+                        color: AppColors.primary, size: 20),
+                    SizedBox(width: AppSpacing.sm),
+                    Expanded(
+                      child: Text(
+                        'Video translation is a Pro feature. Your free '
+                        'translation works in the Text tab. Tap to upgrade.',
+                        style: TextStyle(
+                          color: AppColors.textSecondary,
+                          fontSize: 12,
+                          height: 1.4,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: AppSpacing.md),
+          ],
 
           // Video slot — shows selected video or invites selection
           Container(
@@ -1503,8 +1645,9 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
                       ),
                       Text(
                         hasVideo
-                            ? 'Ready to extract and translate'
-                            : 'Choose a video to extract its speech',
+                            ? 'Ready — speech will be translated to '
+                                '${_targetLanguage.name}'
+                            : 'Choose a video (up to 24MB, 10 minutes)',
                         style: AppTypography.caption.copyWith(
                           color: AppColors.textMuted,
                         ),
@@ -1575,10 +1718,16 @@ class _SmartTranslatorScreenState extends State<SmartTranslatorScreen>
                         color: Colors.white,
                       ),
                     )
-                  : const Icon(Icons.play_circle_rounded, size: 18),
+                  : Icon(
+                      isPremium
+                          ? Icons.play_circle_rounded
+                          : Icons.lock_rounded,
+                      size: 18),
               label: Text(_isProcessing
                   ? (_status.isEmpty ? 'Processing...' : _status)
-                  : 'Extract & Translate'),
+                  : (isPremium
+                      ? 'Extract & Translate'
+                      : 'Extract & Translate (Pro)')),
             ),
           ),
 

@@ -18,7 +18,7 @@ const {defineSecret} = require("firebase-functions/params");
 const admin = require("firebase-admin");
 const express = require("express");
 const cors = require("cors");
-const multer = require("multer"); // ADDED: For direct multipart video uploads
+const Busboy = require("busboy");
 
 const {
   requireAuth,
@@ -55,7 +55,11 @@ const {
   MAX_VIDEO_BYTES,
   WHISPER_PRICE_PER_MINUTE_USD,
 } = require("./lib/videoAnalysis");
-const {generateDailyChallenge} = require("./lib/contentCoach");
+const {
+  generateDailyChallenge,
+  generateCoachIdeas,
+  generateCoachPlan,
+} = require("./lib/contentCoach");
 const {checkRateLimit} = require("./lib/rateLimit");
 const crypto = require("crypto");
 
@@ -96,8 +100,82 @@ function withRateLimit(feature, handler) {
   };
 }
 
-// FIXED: Accepts the video buffer directly instead of downloading from Firebase Storage
-async function analyzeUploadedVideo(uid, buffer, openaiKey) {
+/**
+ * Reads ONE uploaded file (field "video") out of a multipart request.
+ *
+ * Cloud Functions has already consumed the request stream by the time
+ * Express sees it and exposes the bytes as req.rawBody — which is why
+ * stream-based parsers (multer) never receive anything there. Busboy is
+ * fed rawBody directly; piping req is only the fallback for the local
+ * emulator / plain Express.
+ * @returns {Promise<{buffer: Buffer, fileName: string}|null>}
+ */
+function parseVideoUpload(req) {
+  return new Promise((resolve, reject) => {
+    const contentType = req.headers["content-type"] || "";
+    if (!contentType.toLowerCase().startsWith("multipart/form-data")) {
+      return resolve(null);
+    }
+    let busboy;
+    try {
+      busboy = Busboy({
+        headers: req.headers,
+        limits: {fileSize: MAX_VIDEO_BYTES, files: 1},
+      });
+    } catch (e) {
+      return reject(Object.assign(new Error("Malformed upload"), {httpStatus: 400}));
+    }
+
+    const chunks = [];
+    let fileName = "video.mp4";
+    let tooLarge = false;
+    let gotFile = false;
+
+    busboy.on("file", (fieldName, file, info) => {
+      if (gotFile) {
+        file.resume();
+        return;
+      }
+      gotFile = true;
+      if (info && typeof info.filename === "string" && info.filename) {
+        fileName = info.filename;
+      }
+      file.on("data", (d) => chunks.push(d));
+      file.on("limit", () => {
+        tooLarge = true;
+      });
+    });
+    busboy.on("error", (e) => reject(Object.assign(e, {httpStatus: 400})));
+    busboy.on("finish", () => {
+      if (tooLarge) {
+        return reject(Object.assign(
+          new Error("Video is too large to analyze (24MB limit)"), {httpStatus: 413}));
+      }
+      if (!gotFile) return resolve(null);
+      resolve({buffer: Buffer.concat(chunks), fileName});
+    });
+
+    if (req.rawBody) {
+      busboy.end(req.rawBody);
+    } else {
+      req.pipe(busboy);
+    }
+  });
+}
+
+/** Whisper picks its decoder from the file extension, so keep a real one. */
+function whisperFileName(original) {
+  const m = /\.([a-z0-9]{2,5})$/i.exec(original || "");
+  const ext = m ? m[1].toLowerCase() : "mp4";
+  const allowed = ["mp4", "m4a", "mov", "3gp", "mpeg", "mpga", "mp3", "wav", "webm"];
+  return `video.${allowed.includes(ext) ? ext : "mp4"}`;
+}
+
+/**
+ * Transcribes + summarizes an uploaded video, cached per user by content
+ * hash so the same video is never paid for twice.
+ */
+async function analyzeUploadedVideo(uid, buffer, openaiKey, originalName) {
   if (!buffer || buffer.length === 0) {
     throw Object.assign(new Error("No video data received"), {httpStatus: 400});
   }
@@ -111,14 +189,19 @@ async function analyzeUploadedVideo(uid, buffer, openaiKey) {
     .collection("videoAnalysis").doc(analysisKey);
 
   const cached = await analysisRef.get();
-  if (cached.exists) {
+  // Entries cached before timed segments were stored are re-analyzed once
+  // so subtitles can be real.
+  if (cached.exists && Array.isArray(cached.data().segments)) {
     const c = cached.data();
     return {
       analysisKey,
-      summary: c.summary,
-      keyPhrases: c.keyPhrases,
-      transcript: c.transcript || null,
-      durationMinutes: c.durationMinutes,
+      summary: c.summary || "",
+      keyPhrases: c.keyPhrases || [],
+      transcript: c.transcript || "",
+      segments: c.segments || [],
+      language: c.language || null,
+      durationMinutes: c.durationMinutes || 0,
+      hasSpeech: !!(c.transcript && c.transcript.trim().length >= 10),
     };
   }
 
@@ -131,23 +214,35 @@ async function analyzeUploadedVideo(uid, buffer, openaiKey) {
     );
   }
 
-  const {transcript, durationMinutes} = await transcribeVideoBytes(openaiKey, buffer);
+  const {transcript, segments, language, durationMinutes} =
+    await transcribeVideoBytes(openaiKey, buffer, whisperFileName(originalName));
   const {summary, keyPhrases, usage} = await summarizeTranscript(openaiKey, transcript);
   await recordVideoAnalysisSpend(uid, durationMinutes, usage);
 
   const safeTranscript = typeof transcript === "string" && transcript.length > 50000
     ? transcript.slice(0, 50000)
-    : transcript;
+    : (transcript || "");
 
   await analysisRef.set({
     summary,
     keyPhrases,
     transcript: safeTranscript,
+    segments,
+    language,
     durationMinutes,
     analyzedAt: admin.firestore.FieldValue.serverTimestamp(),
   });
-  
-  return {analysisKey, summary, keyPhrases, transcript: safeTranscript, durationMinutes};
+
+  return {
+    analysisKey,
+    summary,
+    keyPhrases,
+    transcript: safeTranscript,
+    segments,
+    language,
+    durationMinutes,
+    hasSpeech: safeTranscript.trim().length >= 10,
+  };
 }
 
 admin.initializeApp();
@@ -170,12 +265,6 @@ const app = express();
 app.use(cors({origin: true}));
 app.use(express.json({limit: "2mb"}));
 
-// ADDED: Multer configuration for in-memory file uploads
-const upload = multer({ 
-  storage: multer.memoryStorage(),
-  limits: { fileSize: MAX_VIDEO_BYTES } 
-});
-
 // ─── Health check ────────────────────────────────────────────────────────
 app.get("/health", (req, res) => {
   res.json({status: "ok", time: new Date().toISOString()});
@@ -183,7 +272,7 @@ app.get("/health", (req, res) => {
 
 // ─── Premium status ─────────────────────────────────────────────────────
 app.get("/verifyPremium", requireAuth, attachPremiumStatus, (req, res) => {
-  res.json({isPremium: req.isPremium});
+  res.json({isPremium: req.isPremium, isOwner: req.isOwner === true});
 });
 
 // ─── Timezone sync ──────────────────────────────────────────────────────
@@ -430,6 +519,9 @@ app.post(
   withRateLimit("processRepurposeVariants", async (req, res) => {
     try {
       const {actionId, videoTitle, platform, analysisKey, tone} = req.body;
+      const targetLanguage = typeof req.body.targetLanguage === "string"
+        ? req.body.targetLanguage.replace(/[^\p{L} ()-]/gu, "").trim().slice(0, 40)
+        : "";
       if (!actionId || !SUPPORTED_ACTIONS.includes(actionId)) {
         return res.status(400).json({
           error: `Unsupported actionId. Supported: ${SUPPORTED_ACTIONS.join(", ")}`,
@@ -455,13 +547,18 @@ app.post(
 
       let videoSummary = null;
       let videoKeyPhrases = null;
+      let transcript = null;
+      let segments = null;
       if (typeof analysisKey === "string" && /^[a-f0-9]{64}$/.test(analysisKey)) {
         try {
           const doc = await db.collection("users").doc(req.user.uid)
             .collection("videoAnalysis").doc(analysisKey).get();
           if (doc.exists) {
-            videoSummary = doc.data().summary || null;
-            videoKeyPhrases = doc.data().keyPhrases || null;
+            const a = doc.data();
+            videoSummary = a.summary || null;
+            videoKeyPhrases = a.keyPhrases || null;
+            transcript = a.transcript || null;
+            segments = Array.isArray(a.segments) ? a.segments : null;
           }
         } catch (e) {
           console.error("Analysis lookup failed, falling back to title-only:", e.message);
@@ -473,10 +570,17 @@ app.post(
         platform,
         videoSummary,
         videoKeyPhrases,
+        transcript,
+        segments,
+        targetLanguage: targetLanguage || null,
         tone,
       });
 
-      const spent = await recordSpend(req.user.uid, result.usage);
+      if (!result.variants || result.variants.length === 0) {
+        return res.status(502).json({error: "The AI returned nothing usable — please try again."});
+      }
+
+      const spent = result.usage ? await recordSpend(req.user.uid, result.usage) : 0;
       const remainingUsd = Math.max(0, budget.remainingUsd - spent);
 
       db.collection("users").doc(req.user.uid).collection("events").add({
@@ -488,6 +592,7 @@ app.post(
       res.json({
         variants: result.variants,
         tone: result.tone,
+        usedTranscript: result.usedTranscript === true,
         remainingCredits: usdToCredits(remainingUsd),
       });
     } catch (e) {
@@ -688,21 +793,109 @@ app.get("/getLibraryStats", requireAuth, async (req, res) => {
       platformCounts[platform] = (platformCounts[platform] || 0) + 1;
     });
 
-    res.json({totalDownloads, platformCounts});
+    res.json({
+      totalDownloads,
+      platformCounts,
+      // Same data in the shape older app builds read.
+      stats: {total: totalDownloads, platforms: platformCounts, categories: {}},
+    });
   } catch (e) {
     console.error("getLibraryStats error:", e);
     res.status(500).json({error: "Could not load library stats"});
   }
 });
 
-// ─── AI Content Coach — real daily challenges (activity-aware) ─────────
-//
-// Now gathers recent activity before generating. The activity block is
-// derived from downloadLog (last 30 days) and events (repurpose actions),
-// so the challenge reflects what the person actually does on the app.
+// ─── AI Content Coach ───────────────────────────────────────────────────
+
+/** Calendar date key (yyyy-mm-dd) for "now + offsetDays" in the user's zone. */
+function dateKeyOffset(tz, offsetDays) {
+  try {
+    return new Intl.DateTimeFormat("en-CA", {
+      timeZone: tz || "UTC", year: "numeric", month: "2-digit", day: "2-digit",
+    }).format(new Date(Date.now() + offsetDays * 24 * 60 * 60 * 1000));
+  } catch (_) {
+    return new Date(Date.now() + offsetDays * 86400000).toISOString().slice(0, 10);
+  }
+}
+
+/**
+ * The streak the person actually has right now: it only counts if the
+ * last completed challenge was today or yesterday (their local dates).
+ */
+function effectiveStreak(userData, tz) {
+  const streak = userData.coachStreak || 0;
+  const last = userData.coachLastCompletedDate || null;
+  if (!last) return streak > 0 && !("coachLastCompletedDate" in userData) ? streak : 0;
+  if (last === dateKeyInZone(tz) || last === dateKeyOffset(tz, -1)) return streak;
+  return 0;
+}
+
+function coachProfileFrom(userData) {
+  return {
+    niche: userData.coachNiche || "general content creation",
+    goal: userData.coachGoal || "",
+    experience: userData.coachExperience || "",
+  };
+}
+
+/**
+ * Last-30-days activity summary. Both queries filter on `timestamp` ONLY
+ * (single-field indexes exist automatically) and narrow by event name in
+ * memory — an equality + range query across two fields would need a
+ * composite index that was never created, and failed every time.
+ */
+async function gatherCoachActivity(userRef) {
+  try {
+    const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+
+    const downloadSnap = await userRef.collection("downloadLog")
+      .where("timestamp", ">=", since).limit(300).get();
+    const platformCounts = {};
+    downloadSnap.forEach((d) => {
+      const p = d.data().platform || "unknown";
+      platformCounts[p] = (platformCounts[p] || 0) + 1;
+    });
+    const sortedPlatforms = Object.entries(platformCounts).sort((a, b) => b[1] - a[1]);
+
+    const eventSnap = await userRef.collection("events")
+      .where("timestamp", ">=", since).limit(500).get();
+    const actionCounts = {};
+    let repurposeCount = 0;
+    let translateCount = 0;
+    eventSnap.forEach((e) => {
+      const data = e.data();
+      if (data.event === "repurpose_action_completed") {
+        repurposeCount++;
+        const actionId = (data.properties || {}).actionId || "unknown";
+        actionCounts[actionId] = (actionCounts[actionId] || 0) + 1;
+      } else if (data.event === "translate_action_completed") {
+        translateCount++;
+      }
+    });
+    const sortedActions = Object.entries(actionCounts).sort((a, b) => b[1] - a[1]);
+
+    return {
+      topPlatform: sortedPlatforms.length > 0 ? sortedPlatforms[0][0] : null,
+      platformCounts,
+      otherPlatforms: sortedPlatforms.slice(1, 3).map((p) => p[0]),
+      totalDownloads: downloadSnap.size,
+      topRepurposeAction: sortedActions.length > 0 ? sortedActions[0][0] : null,
+      repurposeCount,
+      translateCount,
+    };
+  } catch (e) {
+    console.error("Activity aggregation failed (non-critical):", e.message);
+    return null;
+  }
+}
+
+const COACH_PRO_ERROR = "AI Content Coach is a Pro feature";
+
 app.get("/getDailyChallenge", requireAuth, attachPremiumStatus,
   withRateLimit("getDailyChallenge", async (req, res) => {
   try {
+    if (!req.isPremium) return res.status(402).json({error: COACH_PRO_ERROR});
+
     const today = dateKeyInZone(req.userTimezone);
     const userRef = db.collection("users").doc(req.user.uid);
     const challengeRef = userRef.collection("coachChallenges").doc(today);
@@ -712,62 +905,9 @@ app.get("/getDailyChallenge", requireAuth, attachPremiumStatus,
       return res.json(cached.data());
     }
 
-    const userDoc = await userRef.get();
-    const userData = userDoc.data() || {};
-    const niche = userData.coachNiche || "general content creation";
-    const streakDays = userData.coachStreak || 0;
-
-    // ─── Gather 30-day activity ────────────────────────────────────────
-    // Both queries are cheap (indexed on the collection by timestamp in
-    // the downloadLog case and by the event field in the events case),
-    // and both are bounded to 30 days. If either fails, the challenge is
-    // still generated — activity is enrichment, not a dependency.
-    let activity = null;
-    try {
-      const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-
-      const downloadSnap = await userRef.collection("downloadLog")
-        .where("timestamp", ">=", thirtyDaysAgo)
-        .limit(200)
-        .get();
-
-      const platformCounts = {};
-      downloadSnap.forEach((d) => {
-        const p = d.data().platform || "unknown";
-        platformCounts[p] = (platformCounts[p] || 0) + 1;
-      });
-
-      const sortedPlatforms = Object.entries(platformCounts)
-        .sort((a, b) => b[1] - a[1]);
-      const topPlatform = sortedPlatforms.length > 0 ? sortedPlatforms[0][0] : null;
-      const otherPlatforms = sortedPlatforms.slice(1, 3).map((p) => p[0]);
-
-      const repurposeSnap = await userRef.collection("events")
-        .where("event", "==", "repurpose_action_completed")
-        .where("timestamp", ">=", thirtyDaysAgo)
-        .limit(200)
-        .get();
-
-      const actionCounts = {};
-      repurposeSnap.forEach((e) => {
-        const actionId = (e.data().properties || {}).actionId || "unknown";
-        actionCounts[actionId] = (actionCounts[actionId] || 0) + 1;
-      });
-      const sortedActions = Object.entries(actionCounts)
-        .sort((a, b) => b[1] - a[1]);
-      const topRepurposeAction = sortedActions.length > 0 ? sortedActions[0][0] : null;
-
-      activity = {
-        topPlatform,
-        platformCounts,
-        otherPlatforms,
-        totalDownloads: downloadSnap.size,
-        topRepurposeAction,
-        repurposeCount: repurposeSnap.size,
-      };
-    } catch (e) {
-      console.error("Activity aggregation failed (non-critical):", e.message);
-    }
+    const userData = (await userRef.get()).data() || {};
+    const streakDays = effectiveStreak(userData, req.userTimezone);
+    const activity = await gatherCoachActivity(userRef);
 
     const budget = await hasBudgetRemaining(req.user.uid, 0.001);
     if (!budget.allowed) {
@@ -778,13 +918,18 @@ app.get("/getDailyChallenge", requireAuth, attachPremiumStatus,
     }
 
     const challenge = await generateDailyChallenge(
-      openaiKey.value(), niche, streakDays, activity);
+      openaiKey.value(), coachProfileFrom(userData), streakDays, activity);
     const spent = await recordSpend(req.user.uid, challenge.usage);
 
+    const points = challenge.difficulty === "hard" ? 30 :
+      challenge.difficulty === "medium" ? 20 : 10;
     const toSave = {
       title: challenge.title,
       description: challenge.description,
+      steps: challenge.steps,
+      tip: challenge.tip,
       difficulty: challenge.difficulty,
+      points,
       verifiable: challenge.verifiable,
       verifyFeature: challenge.verifyFeature,
       date: today,
@@ -801,7 +946,10 @@ app.get("/getDailyChallenge", requireAuth, attachPremiumStatus,
 
 app.post("/completeDailyChallenge", requireAuth, attachPremiumStatus, async (req, res) => {
   try {
-    const today = dateKeyInZone(req.userTimezone);
+    if (!req.isPremium) return res.status(402).json({error: COACH_PRO_ERROR});
+
+    const tz = req.userTimezone;
+    const today = dateKeyInZone(tz);
     const userRef = db.collection("users").doc(req.user.uid);
     const challengeRef = userRef.collection("coachChallenges").doc(today);
 
@@ -811,11 +959,18 @@ app.post("/completeDailyChallenge", requireAuth, attachPremiumStatus, async (req
     }
     const challenge = snap.data();
     if (challenge.completed) {
-      return res.json({success: true, alreadyCompleted: true});
+      const u = (await userRef.get()).data() || {};
+      return res.json({
+        success: true,
+        alreadyCompleted: true,
+        newStreak: effectiveStreak(u, tz),
+        points: u.coachPoints || 0,
+        pointsEarned: 0,
+      });
     }
 
     if (challenge.verifiable && challenge.verifyFeature) {
-      const startOfDay = startOfLocalDay(req.userTimezone);
+      const startOfDay = startOfLocalDay(tz);
       let verified = false;
 
       if (challenge.verifyFeature === "download") {
@@ -825,33 +980,193 @@ app.post("/completeDailyChallenge", requireAuth, attachPremiumStatus, async (req
       } else {
         const eventName = challenge.verifyFeature === "repurpose"
           ? "repurpose_action_completed" : "translate_action_completed";
+        // Range filter on timestamp only + in-memory match — no composite
+        // index needed (see gatherCoachActivity).
         const events = await userRef.collection("events")
-          .where("event", "==", eventName)
-          .where("timestamp", ">=", startOfDay).limit(1).get();
-        verified = !events.empty;
+          .where("timestamp", ">=", startOfDay).limit(300).get();
+        events.forEach((e) => {
+          if (e.data().event === eventName) verified = true;
+        });
       }
 
       if (!verified) {
+        const how = challenge.verifyFeature === "download"
+          ? "Download at least one video or photo today"
+          : challenge.verifyFeature === "repurpose"
+            ? "Use Repurpose Studio at least once today"
+            : "Translate something at least once today";
         return res.status(400).json({
-          error: `Use ${challenge.verifyFeature} at least once today to complete this challenge.`,
+          error: `${how} to complete this challenge.`,
           verified: false,
         });
       }
     }
 
-    const newStreak = (await userRef.get()).data()?.coachStreak || 0;
-    await challengeRef.update({completed: true, completedAt: admin.firestore.FieldValue.serverTimestamp()});
-    await userRef.set({
-      coachStreak: newStreak + 1,
-      coachPoints: admin.firestore.FieldValue.increment(
-        challenge.difficulty === "hard" ? 30 : challenge.difficulty === "medium" ? 20 : 10,
-      ),
-    }, {merge: true});
+    const pointsEarned = typeof challenge.points === "number" ? challenge.points :
+      (challenge.difficulty === "hard" ? 30 : challenge.difficulty === "medium" ? 20 : 10);
 
-    res.json({success: true, newStreak: newStreak + 1});
+    const result = await db.runTransaction(async (tx) => {
+      const userSnap = await tx.get(userRef);
+      const u = userSnap.data() || {};
+      const last = u.coachLastCompletedDate || null;
+      const prev = u.coachStreak || 0;
+      let newStreak;
+      if (last === today) {
+        newStreak = Math.max(1, prev);
+      } else if (last === dateKeyOffset(tz, -1) || (!last && prev > 0)) {
+        newStreak = prev + 1;
+      } else {
+        newStreak = 1;
+      }
+      const points = (u.coachPoints || 0) + pointsEarned;
+      tx.set(userRef, {
+        coachStreak: newStreak,
+        coachBestStreak: Math.max(u.coachBestStreak || 0, newStreak),
+        coachPoints: points,
+        coachLastCompletedDate: today,
+      }, {merge: true});
+      tx.update(challengeRef, {
+        completed: true,
+        completedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      return {newStreak, points};
+    });
+
+    res.json({success: true, newStreak: result.newStreak, points: result.points, pointsEarned});
   } catch (e) {
     console.error("completeDailyChallenge error:", e);
     res.status(502).json({error: "Could not complete challenge"});
+  }
+});
+
+// Personalised content ideas + coaching tips. Cached per local day;
+// ?refresh=1 regenerates (bounded by the rate limiter and the AI budget).
+app.get("/getCoachIdeas", requireAuth, attachPremiumStatus,
+  withRateLimit("getCoachIdeas", async (req, res) => {
+  try {
+    if (!req.isPremium) return res.status(402).json({error: COACH_PRO_ERROR});
+
+    const today = dateKeyInZone(req.userTimezone);
+    const userRef = db.collection("users").doc(req.user.uid);
+    const ideasRef = userRef.collection("coachIdeas").doc(today);
+    const refresh = req.query.refresh === "1";
+
+    const activity = await gatherCoachActivity(userRef);
+    const activityOut = activity ? {
+      topPlatform: activity.topPlatform,
+      platformCounts: activity.platformCounts,
+      totalDownloads: activity.totalDownloads,
+      repurposeCount: activity.repurposeCount,
+      translateCount: activity.translateCount,
+      topRepurposeAction: activity.topRepurposeAction,
+    } : null;
+
+    if (!refresh) {
+      const cached = await ideasRef.get();
+      if (cached.exists) {
+        const c = cached.data();
+        return res.json({ideas: c.ideas || [], tips: c.tips || [], date: today, activity: activityOut});
+      }
+    }
+
+    const budget = await hasBudgetRemaining(req.user.uid, 0.002);
+    if (!budget.allowed) {
+      return res.status(429).json({
+        error: "This billing period's AI budget is used up.",
+        canBuyCredits: true,
+      });
+    }
+
+    const userData = (await userRef.get()).data() || {};
+    const result = await generateCoachIdeas(
+      openaiKey.value(), coachProfileFrom(userData), activity);
+    await recordSpend(req.user.uid, result.usage);
+
+    if (result.ideas.length === 0) {
+      return res.status(502).json({error: "Could not generate ideas — please try again."});
+    }
+
+    await ideasRef.set({
+      ideas: result.ideas,
+      tips: result.tips,
+      date: today,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    res.json({ideas: result.ideas, tips: result.tips, date: today, activity: activityOut});
+  } catch (e) {
+    console.error("getCoachIdeas error:", e);
+    res.status(502).json({error: "Could not load content ideas"});
+  }
+}));
+
+// Learning path. Generated once per (niche, goal, experience) and kept,
+// with per-step progress, until the profile changes.
+app.get("/getCoachPlan", requireAuth, attachPremiumStatus,
+  withRateLimit("getCoachPlan", async (req, res) => {
+  try {
+    if (!req.isPremium) return res.status(402).json({error: COACH_PRO_ERROR});
+
+    const userRef = db.collection("users").doc(req.user.uid);
+    const planRef = userRef.collection("meta").doc("coachPlan");
+    const userData = (await userRef.get()).data() || {};
+    const profile = coachProfileFrom(userData);
+    const profileKey = `${profile.niche}|${profile.goal}|${profile.experience}`.toLowerCase();
+
+    const cached = await planRef.get();
+    if (cached.exists && cached.data().profileKey === profileKey &&
+        Array.isArray(cached.data().steps) && cached.data().steps.length > 0) {
+      const c = cached.data();
+      return res.json({steps: c.steps, completed: c.completed || []});
+    }
+
+    const budget = await hasBudgetRemaining(req.user.uid, 0.002);
+    if (!budget.allowed) {
+      return res.status(429).json({
+        error: "This billing period's AI budget is used up.",
+        canBuyCredits: true,
+      });
+    }
+
+    const result = await generateCoachPlan(openaiKey.value(), profile);
+    await recordSpend(req.user.uid, result.usage);
+    if (result.steps.length === 0) {
+      return res.status(502).json({error: "Could not build your learning path — please try again."});
+    }
+
+    await planRef.set({
+      profileKey,
+      steps: result.steps,
+      completed: [],
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    res.json({steps: result.steps, completed: []});
+  } catch (e) {
+    console.error("getCoachPlan error:", e);
+    res.status(502).json({error: "Could not load your learning path"});
+  }
+}));
+
+app.post("/setCoachStepDone", requireAuth, attachPremiumStatus, async (req, res) => {
+  try {
+    if (!req.isPremium) return res.status(402).json({error: COACH_PRO_ERROR});
+    const {stepId, done} = req.body || {};
+    if (typeof stepId !== "string" || !/^step\d{1,2}$/.test(stepId)) {
+      return res.status(400).json({error: "Invalid stepId"});
+    }
+    const planRef = db.collection("users").doc(req.user.uid)
+      .collection("meta").doc("coachPlan");
+    const snap = await planRef.get();
+    if (!snap.exists) return res.status(400).json({error: "No learning path yet"});
+    await planRef.update({
+      completed: done === false
+        ? admin.firestore.FieldValue.arrayRemove(stepId)
+        : admin.firestore.FieldValue.arrayUnion(stepId),
+    });
+    const after = (await planRef.get()).data() || {};
+    res.json({success: true, completed: after.completed || []});
+  } catch (e) {
+    console.error("setCoachStepDone error:", e);
+    res.status(500).json({error: "Could not save progress"});
   }
 });
 
@@ -880,16 +1195,18 @@ function startOfLocalDay(tz) {
 }
 
 // ─── AI Content Coach — profile ─────────────────────────────────────────
-app.get("/getCoachProfile", requireAuth, async (req, res) => {
+app.get("/getCoachProfile", requireAuth, attachPremiumStatus, async (req, res) => {
   try {
     const doc = await db.collection("users").doc(req.user.uid).get();
     const data = doc.data() || {};
     res.json({
-      streak: data.coachStreak || 0,
+      streak: effectiveStreak(data, req.userTimezone),
+      bestStreak: data.coachBestStreak || data.coachStreak || 0,
       points: data.coachPoints || 0,
       niche: data.coachNiche || null,
       goal: data.coachGoal || null,
       name: data.coachName || null,
+      experience: data.coachExperience || null,
     });
   } catch (e) {
     console.error("getCoachProfile error:", e);
@@ -899,7 +1216,7 @@ app.get("/getCoachProfile", requireAuth, async (req, res) => {
 
 app.post("/saveCoachProfile", requireAuth, async (req, res) => {
   try {
-    const {niche, goal, name} = req.body || {};
+    const {niche, goal, name, experience} = req.body || {};
     const update = {};
     const clean = (v, max) =>
       typeof v === "string" ? v.replace(/[\x00-\x1F\x7F]/g, "").trim().slice(0, max) : null;
@@ -911,6 +1228,10 @@ app.post("/saveCoachProfile", requireAuth, async (req, res) => {
     if (cleanNiche) update.coachNiche = cleanNiche;
     if (cleanGoal) update.coachGoal = cleanGoal;
     if (cleanName) update.coachName = cleanName;
+    const cleanExperience = clean(experience, 20);
+    if (cleanExperience && ["beginner", "intermediate", "advanced"].includes(cleanExperience.toLowerCase())) {
+      update.coachExperience = cleanExperience.toLowerCase();
+    }
 
     if (Object.keys(update).length === 0) {
       return res.status(400).json({error: "Nothing valid to save"});
@@ -927,7 +1248,14 @@ app.post("/saveCoachProfile", requireAuth, async (req, res) => {
 app.post("/trackEvent", requireAuth, async (req, res) => {
   try {
     const {event, properties} = req.body;
-    if (!event) return res.status(400).json({error: "event is required"});
+    if (!event || typeof event !== "string" || event.length > 80) {
+      return res.status(400).json({error: "event is required"});
+    }
+    // These two are what Coach challenges are verified against — only the
+    // server itself may record them.
+    if (event === "repurpose_action_completed" || event === "translate_action_completed") {
+      return res.json({success: true});
+    }
 
     await db.collection("users").doc(req.user.uid).collection("events").add({
       event,
@@ -945,7 +1273,7 @@ app.post("/trackEvent", requireAuth, async (req, res) => {
 // ─── Download logging ───────────────────────────────────────────────────
 app.post("/logDownload", requireAuth, async (req, res) => {
   try {
-    const {platform, fileName, isVideo} = req.body;
+    const {platform, fileName, isVideo} = req.body || {};
     await db.collection("users").doc(req.user.uid).collection("downloadLog").add({
       platform: platform || "unknown",
       fileName: fileName || "",
@@ -983,28 +1311,39 @@ app.post("/suggestCollections", requireAuth, notImplemented("suggestCollections"
 app.get("/getCloudVaultFiles", requireAuth, notImplemented("getCloudVaultFiles"));
 app.post("/deleteCloudFile", requireAuth, notImplemented("deleteCloudFile"));
 
-// FIXED: Using multer to parse the uploaded video bytes directly
-app.post("/analyzeVideo", requireAuth, attachPremiumStatus, upload.single("video"),
+// ─── Video analysis (transcribe + summarize an uploaded video) ──────────
+app.post("/analyzeVideo", requireAuth, attachPremiumStatus,
   withRateLimit("analyzeVideo", async (req, res) => {
   try {
     if (!req.isPremium) {
       return res.status(402).json({error: "Upgrade to Pro to analyze videos"});
     }
-    if (!req.file) {
+    const upload = await parseVideoUpload(req);
+    if (!upload || upload.buffer.length === 0) {
       return res.status(400).json({error: "No video file uploaded"});
     }
-    
+
     const analysis = await analyzeUploadedVideo(
-      req.user.uid, req.file.buffer, openaiKey.value(),
+      req.user.uid, upload.buffer, openaiKey.value(), upload.fileName,
     );
     res.json(analysis);
   } catch (e) {
     console.error("analyzeVideo error:", e.message);
-    res.status(e.httpStatus || 502).json({
-      error: e.message || "Video analysis failed",
+    const status = e.httpStatus || 502;
+    res.status(status).json({
+      error: status === 502
+        ? "The video could not be transcribed right now — please try again."
+        : (e.message || "Video analysis failed"),
       canBuyCredits: e.canBuyCredits || false,
     });
   }
 }));
 
-exports.apiV1 = onRequest({secrets: ALL_SECRETS, region: "us-central1"}, app);
+exports.apiV1 = onRequest({
+  secrets: ALL_SECRETS,
+  region: "us-central1",
+  // Video analysis holds an uploaded file (up to 24MB) in memory and waits
+  // on transcription, so it needs more than the 256MiB / 60s defaults.
+  memory: "1GiB",
+  timeoutSeconds: 300,
+}, app);
