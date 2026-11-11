@@ -298,32 +298,13 @@ class CloudVaultService {
       }
       onStatus?.call('⬇️ Downloading...');
 
-      // Get download URL from Firestore or Storage
-      String downloadUrl;
-      final doc = await _firestore
-          .collection('users')
-          .doc(_uid)
-          .collection('cloudFiles')
-          .doc(file.id)
-          .get();
-
-      if (doc.exists) {
-        downloadUrl = doc.data()?['downloadUrl'] as String? ?? '';
-        if (downloadUrl.isEmpty) {
-          final ref = _storage.ref().child(file.storagePath);
-          downloadUrl = await ref.getDownloadURL();
-        }
-      } else {
-        final ref = _storage.ref().child(file.storagePath);
-        downloadUrl = await ref.getDownloadURL();
-      }
-
       // Download to temp first
       final tempDir = await getTemporaryDirectory();
-      final tempPath = '${tempDir.path}/${_safeFileName(file.fileName)}';
+      final safeName = _safeFileName(file.fileName);
+      final tempPath = '${tempDir.path}/$safeName';
       final tempFile = File(tempPath);
 
-      // Download using Firebase Storage
+      // Get Storage reference directly - this is safer than relying on a stored downloadUrl token
       final ref = _storage.ref().child(file.storagePath);
       final downloadTask = ref.writeToFile(tempFile);
 
@@ -443,16 +424,6 @@ class CloudVaultService {
     }
   }
 
-  // NOTE: updatePremiumExpiry() used to live here, letting the client write
-  // premiumExpiry/planId straight to Firestore based on its own local
-  // purchase callback. That was a real security hole — a modified client
-  // (or a Frida/Xposed hook faking a successful purchase) could grant
-  // itself premium forever without ever paying. It's been removed. The
-  // ONLY place premiumExpiry/planId get written now is server-side, in
-  // functions/index.js's /verifySubscriptionPurchase, after Google Play
-  // itself has confirmed the purchase is real. If you're tempted to bring
-  // this back for convenience, don't — go through the server endpoint.
-
   // ─── Helper methods ──────────────────────────────────────────────────────
 
   bool _isVideoFile(String fileName) {
@@ -502,11 +473,6 @@ class CloudVaultService {
     try {
       final imageFile = File(imagePath);
       if (!await imageFile.exists()) return null;
-
-      // For images, we'll resize using a simple approach
-      // Since we can't easily resize images in pure Dart without a package,
-      // we'll just read the file and return it
-      // For production, consider using image package for resizing
       return await imageFile.readAsBytes();
     } catch (e) {
       print('Image thumbnail error: $e');

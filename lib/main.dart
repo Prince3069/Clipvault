@@ -13,24 +13,23 @@ import 'providers/settings_provider.dart';
 import 'providers/download_provider.dart';
 import 'providers/premium_provider.dart';
 import 'providers/cloud_vault_provider.dart';
+import 'providers/notification_provider.dart';
 import 'services/share_target_service.dart';
 import 'services/notification_service.dart';
-import 'app.dart'; // <-- This imports MyApp
+import 'services/timezone_service.dart';
+import 'app.dart';
 
 // ─── Web Entry Point ──────────────────────────────────────────────────────
 
 void main() async {
-  // Ensure Flutter binding is initialized for web
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Lock to portrait only (Android only - web doesn't support this)
   if (!kIsWeb) {
     await SystemChrome.setPreferredOrientations([
       DeviceOrientation.portraitUp,
       DeviceOrientation.portraitDown,
     ]);
 
-    // Status bar styling (Android only)
     SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
       statusBarColor: Colors.transparent,
       statusBarIconBrightness: Brightness.light,
@@ -39,14 +38,12 @@ void main() async {
     ));
   }
 
-  // Initialize Firebase
   try {
     await Firebase.initializeApp(
       options: DefaultFirebaseOptions.currentPlatform,
     );
   } catch (e) {
     print('Firebase init: $e');
-    // For web, try without options if it fails
     if (kIsWeb) {
       try {
         await Firebase.initializeApp();
@@ -56,7 +53,7 @@ void main() async {
     }
   }
 
-  // Initialize Notification Service
+  // Local notification channel for download-completion alerts.
   if (!kIsWeb) {
     try {
       await NotificationService.init();
@@ -69,7 +66,13 @@ void main() async {
   // Anonymous authentication
   await _signInAnonymously();
 
-  // Initialize Share Target Service (Android only)
+  // Sync timezone (background, not awaited). Only hits the network when
+  // the device's IANA zone differs from the last synced value.
+  if (!kIsWeb) {
+    TimezoneService.syncIfChanged();
+  }
+
+  // Share Target Service (Android only)
   if (!kIsWeb) {
     try {
       await ShareTargetService.instance.initialize();
@@ -87,8 +90,14 @@ void main() async {
         ChangeNotifierProvider(create: (_) => DownloadProvider()),
         ChangeNotifierProvider(create: (_) => PremiumProvider()..initialize()),
         ChangeNotifierProvider(create: (_) => CloudVaultProvider()),
+        // NotificationProvider registers the FCM token on construction.
+        // If permission is denied, it simply doesn't register — everything
+        // else in the app keeps working.
+        ChangeNotifierProvider(
+          create: (_) => NotificationProvider()..initialize(),
+        ),
       ],
-      child: const MyApp(), // <-- MyApp is imported from app.dart
+      child: const MyApp(),
     ),
   );
 }

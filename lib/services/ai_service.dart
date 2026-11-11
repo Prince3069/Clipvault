@@ -7,7 +7,6 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/foundation.dart';
 
 class AIService {
@@ -230,10 +229,6 @@ class AIService {
   /// the analysisKey. Null means "analysis isn't possible" (file missing,
   /// too large, offline, not Pro, budget used) — never an error the
   /// caller has to handle; just a signal to fall back to title-only.
-  ///
-  /// Existing callers that only care about the key should keep using this
-  /// method. Callers that need the transcript or summary should use
-  /// [analyzeVideoFileFull] below.
   Future<String?> analyzeVideoFile(String localPath) async {
     final result = await analyzeVideoFileFull(localPath);
     return result?['analysisKey'] as String?;
@@ -257,32 +252,27 @@ class AIService {
         return null;
       }
 
-      final uid = FirebaseAuth.instance.currentUser?.uid;
-      if (uid == null) {
-        debugPrint('analyzeVideoFileFull: no signed-in user');
-        return null;
-      }
-
-      final storagePath =
-          'users/$uid/analysis_temp/${DateTime.now().millisecondsSinceEpoch}.mp4';
-      await FirebaseStorage.instance
-          .ref(storagePath)
-          .putFile(file, SettableMetadata(contentType: 'video/mp4'));
-
       final token = await _getIdToken();
-      final response = await http.post(
+
+      // FIX: Use direct Multipart HTTP upload instead of Firebase Storage.
+      // Firebase Storage rules were silently failing the upload. 
+      // Direct HTTP bypasses these rules and sends the bytes straight to the API.
+      final request = http.MultipartRequest(
+        'POST',
         Uri.parse('$_baseUrl/analyzeVideo'),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
-        },
-        body: jsonEncode({'storagePath': storagePath}),
       );
+      request.headers['Authorization'] = 'Bearer $token';
+      request.files.add(await http.MultipartFile.fromPath('video', localPath));
+
+      final streamedResponse = await request.send().timeout(const Duration(minutes: 2));
+      final response = await http.Response.fromStream(streamedResponse);
+
       if (response.statusCode != 200) {
         debugPrint(
             'analyzeVideoFileFull failed (${response.statusCode}): ${response.body}');
         return null;
       }
+      
       final data = jsonDecode(response.body) as Map<String, dynamic>;
       debugPrint('analyzeVideoFileFull: success, key=${data['analysisKey']}, '
           'transcriptLength=${(data['transcript'] as String?)?.length ?? 0}');
@@ -465,13 +455,6 @@ class AIService {
   // ──────────────────────────────────────────────────────────────────────────
 
   /// The error fallback deliberately returns remainingCredits: null — NOT 0.
-  /// The old fallback returned {'credits': 0, 'isPremium': false}, which no
-  /// caller ever actually read (there is no 'credits' key in the real
-  /// /getAICredits response shape), and every caller that did
-  /// `credits['remainingCredits'] as int? ?? 0` silently turned a failed
-  /// request into "0 credits" — which the Repurpose Studio UI then
-  /// displayed as if the person genuinely had none, even when they were
-  /// Pro. null means "unknown", and the UI can hide the badge instead.
   Future<Map<String, dynamic>> getAICredits() async {
     try {
       final token = await _getIdToken();
@@ -555,9 +538,7 @@ class AIService {
           if (errBody is Map && errBody['error'] is String) {
             message = errBody['error'] as String;
           }
-        } catch (_) {
-          // Body wasn't JSON — fall back to the generic message above.
-        }
+        } catch (_) {}
         throw Exception(message);
       }
 

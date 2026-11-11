@@ -1,0 +1,21 @@
+{
+  "name": "medianest-functions",
+  "description": "MediaNest backend (Cloud Functions)",
+  "private": true,
+  "main": "index.js",
+  "engines": {
+    "node": "22"
+  },
+  "scripts": {
+    "lint": "echo \"no lint configured\"",
+    "serve": "firebase emulators:start --only functions",
+    "deploy": "firebase deploy --only functions"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.22.3",
+    "firebase-admin": "^13.10.0",
+    "firebase-functions": "^6.6.0",
+    "googleapis": "^183.0.0"
+  }
+}

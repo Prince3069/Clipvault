@@ -1,19 +1,12 @@
 // lib/repurpose.js
-// Real implementations for the 7 action IDs repurpose_studio.dart sends:
-// caption, hashtags, subtitle, translate, summarize, script, tweet_thread.
+// Multi-variant + tone-aware Repurpose Studio prompts.
 //
-// Every prompt below now takes an optional REAL content description —
-// videoSummary and videoKeyPhrases, from lib/videoAnalysis.js's actual
-// transcription of the video (see index.js's /processRepurposeAction) —
-// instead of working from just a title and platform name. That was the
-// actual root cause of "Repurpose generates random, unrelated content":
-// the AI was never given anything real to describe; it was inventing
-// plausible-sounding output from a bare title every time.
-//
-// When no video analysis is available (no source URL, analysis failed,
-// over the length cap), every prompt falls back to the exact same
-// title-only behavior this file always had — never a hard failure, just
-// a lower-quality result, same as before this feature existed.
+// Previously each action returned ONE string built from one prompt.
+// This version returns THREE variants per call, each written with a
+// distinct angle, and lets the client pass a tone modifier that is
+// folded into the prompt. The point: users pick the caption that fits
+// their voice, instead of being handed a single AI opinion and told
+// to like it.
 
 const {chatComplete} = require("./openai");
 
@@ -21,41 +14,36 @@ const {chatComplete} = require("./openai");
  * Detects machine-generated filenames (WhatsApp/Instagram/etc. auto-named
  * files like "whatsapp_1792091033341.mp4") that carry no semantic content.
  * When the title IS one of these, sending it to the AI is worse than
- * sending nothing — the AI ends up describing "a video titled
- * 'whatsapp_1792091033341'", which is where most of the "Repurpose output
- * feels generic/random" impression comes from on WhatsApp clips in
- * particular. Replacing it with "an untitled clip" plus a real transcript
- * summary (when analysis succeeded) is what actually fixes that.
- *
- * Returns the title as-is when it looks like a real human title.
+ * sending nothing.
  */
 function cleanTitle(raw) {
   if (!raw) return "an untitled clip";
   const trimmed = String(raw).trim();
   if (trimmed.length === 0) return "an untitled clip";
 
-  // Strip the file extension before matching
   const withoutExt = trimmed.replace(/\.[a-z0-9]{2,5}$/i, "");
 
-  // Patterns: <platform>_<digits>, <platform>-<digits>, video_<digits>, etc.
   const looksMachine =
     /^(whatsapp|waba|wa|instagram|insta|tiktok|musically|facebook|fb|twitter|x|vimeo|dailymotion|reddit|snapchat|telegram|signal|download|video|image|clip|media|screenrecord)[\s_-]*\d{6,}$/i
       .test(withoutExt);
 
   if (looksMachine) return "an untitled clip";
-
-  // All-digits filenames — also meaningless
   if (/^\d{6,}$/.test(withoutExt)) return "an untitled clip";
 
   return trimmed;
 }
 
-/**
- * Builds the shared "what this video actually contains" block every
- * prompt below folds in when it's available. Centralized here so the
- * fallback behavior (nothing, when there's no real analysis) is defined
- * in exactly one place, not duplicated seven times.
- */
+/** Maps a tone name to a directive the model will actually follow. */
+const TONE_DIRECTIVES = {
+  default: "",
+  funny: "Tone: light, playful, and slightly funny. One tasteful joke is fine.",
+  professional: "Tone: polished, credible, and professional — no slang, no emojis.",
+  bold: "Tone: high-contrast and punchy. Short, confident sentences.",
+  warm: "Tone: warm and personal, like talking to a friend — one gentle emoji OK.",
+  punchy: "Tone: ultra-concise. Cut every word that isn't pulling weight.",
+};
+
+/** Formats the "what this video is about" context block. */
 function contentContext(ctx) {
   if (!ctx.videoSummary) return "";
   const phrases = (ctx.videoKeyPhrases && ctx.videoKeyPhrases.length > 0)
@@ -64,92 +52,166 @@ function contentContext(ctx) {
   return ` The video is actually about: "${ctx.videoSummary}".${phrases}`;
 }
 
+/**
+ * Per-action definition. Each builds a prompt that asks for THREE
+ * variants on separate numbered lines. The variants are parsed back
+ * out from the reply by the server before returning to the client.
+ */
 const PROMPTS = {
   caption: (ctx) =>
-    `Write one punchy, scroll-stopping social media caption for a ${ctx.platform} ` +
-    `video titled "${ctx.videoTitle}".${contentContext(ctx)} Include 1-2 relevant ` +
-    `emoji. Keep it under 220 characters. Reply with only the caption text, nothing else.`,
+    `Write THREE different scroll-stopping social media captions for a ` +
+    `${ctx.platform} video titled "${ctx.videoTitle}".${contentContext(ctx)} ` +
+    `Each variant should take a DIFFERENT angle: one curiosity-driven, one ` +
+    `value-driven, one emotional. Each under 220 characters. Include 1-2 ` +
+    `relevant emoji per caption. Format your reply as exactly three lines, ` +
+    `each starting with "1. ", "2. ", "3. " — nothing else on those lines.`,
 
   hashtags: (ctx) =>
-    `Suggest 12 relevant, high-reach hashtags for a ${ctx.platform} video titled ` +
-    `"${ctx.videoTitle}".${contentContext(ctx)} Reply with only the hashtags ` +
-    `separated by spaces, each starting with #, nothing else.`,
+    `Suggest THREE different sets of hashtags for a ${ctx.platform} video ` +
+    `titled "${ctx.videoTitle}".${contentContext(ctx)} Each set has 10-12 ` +
+    `hashtags. The three sets should differ in emphasis: (a) broad reach, ` +
+    `(b) niche community, (c) trend-riding. Format your reply as exactly ` +
+    `three lines, each starting with "1. ", "2. ", "3. ", with hashtags ` +
+    `separated by spaces. No other text.`,
 
-  // When the video was actually analyzed, produce a subtitle-track PREVIEW
-  // — several short, timestamped lines derived from what is really said.
-  // This is what "Subtitles" means to a user, and it's honest about being
-  // a preview (real SRT timing would need the Whisper segment timings,
-  // which this pipeline doesn't carry). When there's no transcript, this
-  // falls back to a single opening-line hook, which is genuinely all that
-  // can be produced without real speech — and the prompt says so.
   subtitle: (ctx) => {
     if (ctx.videoSummary) {
-      return `Generate a short subtitle-track preview for this ${ctx.platform} ` +
-        `video, based on what is actually said.${contentContext(ctx)} ` +
-        `Output 5-7 numbered lines in this exact format: ` +
-        `"00:00  <the actual line of dialogue>" — each line under 12 words, ` +
-        `timestamps increasing by roughly 3 seconds starting at 00:00 ` +
-        `(00:00, 00:03, 00:06, 00:09, …). Reply with ONLY those lines, ` +
-        `nothing else — no intro text, no labels.`;
+      return `Generate THREE alternate subtitle-track previews for this ` +
+        `${ctx.platform} video, all based on the same underlying content.` +
+        `${contentContext(ctx)} Each preview is 4-5 short timestamped lines ` +
+        `in the format "00:00  <line>" (timestamps rising by roughly 3 ` +
+        `seconds). Variant 1: literal and faithful. Variant 2: punchy and ` +
+        `condensed. Variant 3: warm and conversational. Format your reply ` +
+        `as three blocks, each starting with "1. ", "2. ", "3. " on its ` +
+        `first line. No other text.`;
     }
-    return `Write a single opening subtitle line (max 12 words) that could ` +
-      `appear at the very start of a ${ctx.platform} video titled ` +
-      `"${ctx.videoTitle}".${contentContext(ctx)} ` +
-      `Reply with only the line. (No speech transcript was available for ` +
-      `this video, so this is a hook/opener, not a full subtitle track.)`;
+    return `Write THREE alternate opening subtitle lines (max 12 words each) ` +
+      `for a ${ctx.platform} video titled "${ctx.videoTitle}".${contentContext(ctx)} ` +
+      `Variant 1: curiosity hook. Variant 2: bold statement. Variant 3: ` +
+      `question. Format your reply as exactly three lines, each starting ` +
+      `with "1. ", "2. ", "3. ". No other text.`;
   },
 
-  // Deliberately unchanged — this translates the TITLE itself for
-  // localization, a well-defined task on its own that doesn't need or
-  // benefit from a content summary the same way the others do.
   translate: (ctx) =>
-    `Translate this video title into Spanish, French, and Portuguese, each on its ` +
-    `own line prefixed with the language name: "${ctx.videoTitle}"`,
+    `Translate this title into three combinations, each on its own line: ` +
+    `(1) Spanish + French, (2) Portuguese + Italian, (3) German + Dutch. ` +
+    `Format as: "1. ES: <es> | FR: <fr>" then same for 2 and 3. Title: ` +
+    `"${ctx.videoTitle}"`,
 
-  summarize: (ctx) =>
-    ctx.videoSummary
-      ? `Rewrite this into a punchy 2-sentence description for a ${ctx.platform} ` +
-        `video, written to make someone want to watch it: "${ctx.videoSummary}"`
-      : `Write a 2-sentence summary/description for a ${ctx.platform} video titled ` +
-        `"${ctx.videoTitle}", written to make someone want to watch it.`,
+  summarize: (ctx) => {
+    const subject = ctx.videoSummary
+        ? `the following content: "${ctx.videoSummary}"`
+        : `a ${ctx.platform} video titled "${ctx.videoTitle}"`;
+    return `Write THREE different 2-sentence descriptions for ${subject}, ` +
+      `each written to make someone want to watch it. Variant 1: ` +
+      `story-driven. Variant 2: benefit-driven. Variant 3: question-driven. ` +
+      `Format your reply as exactly three lines, each starting with ` +
+      `"1. ", "2. ", "3. ". No other text.`;
+  },
 
   script: (ctx) =>
-    `Write a short 3-beat video script outline (Hook / Body / Call-to-action, one ` +
-    `line each) for a ${ctx.platform} video titled "${ctx.videoTitle}".${contentContext(ctx)}`,
+    `Write THREE different short video script outlines (Hook / Body / ` +
+    `Call-to-action, one line each) for a ${ctx.platform} video titled ` +
+    `"${ctx.videoTitle}".${contentContext(ctx)} Variant 1: fast and ` +
+    `energetic. Variant 2: thoughtful and narrative. Variant 3: ` +
+    `teaching-focused. Format your reply as three blocks, each starting ` +
+    `with "1. ", "2. ", "3. ". No other text.`,
 
   tweet_thread: (ctx) =>
-    `Write a 3-tweet thread (numbered 1/3, 2/3, 3/3) repurposing a ${ctx.platform} ` +
-    `video titled "${ctx.videoTitle}" into a text thread.${contentContext(ctx)} ` +
-    `Keep each tweet under 260 characters.`,
+    `Write THREE different 3-tweet threads (numbered 1/3, 2/3, 3/3) ` +
+    `repurposing a ${ctx.platform} video titled "${ctx.videoTitle}" into ` +
+    `text.${contentContext(ctx)} Variant 1: contrarian take. Variant 2: ` +
+    `lesson-learned. Variant 3: story-driven. Each tweet under 260 chars. ` +
+    `Format your reply as three blocks, each starting with "1. ", "2. ", ` +
+    `"3. ". No other text.`,
 };
 
 const SUPPORTED_ACTIONS = Object.keys(PROMPTS);
+const SUPPORTED_TONES = Object.keys(TONE_DIRECTIVES);
+
+/**
+ * Splits the model's reply into 3 variants. Handles the case where the
+ * model returns numbered lines ("1. ", "2. ", "3. ") as well as the case
+ * where it returns blocks separated by blank lines.
+ */
+function parseVariants(text) {
+  if (!text) return [];
+
+  // First try: numbered-line splitting. Matches "1. ", "1) ", "1 - " etc.
+  const numbered = text
+    .split(/\n(?=\s*\d\s*[.\-)]\s)/)
+    .map((block) => block.replace(/^\s*\d\s*[.\-)]\s*/, "").trim())
+    .filter((s) => s.length > 0);
+
+  if (numbered.length >= 2) return numbered.slice(0, 3);
+
+  // Fallback: blank-line-separated blocks.
+  const blocks = text
+    .split(/\n\s*\n/)
+    .map((b) => b.trim())
+    .filter((b) => b.length > 0);
+  if (blocks.length >= 2) return blocks.slice(0, 3);
+
+  // Last resort: return the whole thing as a single variant.
+  return [text.trim()].filter((s) => s.length > 0);
+}
 
 /**
  * @param {string} apiKey OpenAI key
  * @param {string} actionId one of SUPPORTED_ACTIONS
- * @param {{videoTitle: string, platform: string, videoSummary?: string|null, videoKeyPhrases?: string[]|null}} ctx
- * @returns {Promise<{text: string, usage: object|null}>}
+ * @param {{videoTitle: string, platform: string, videoSummary?: string|null, videoKeyPhrases?: string[]|null, tone?: string|null}} ctx
+ * @returns {Promise<{variants: string[], usage: object|null, tone: string}>}
  */
-async function runRepurposeAction(apiKey, actionId, ctx) {
+async function runRepurposeVariants(apiKey, actionId, ctx) {
   const buildPrompt = PROMPTS[actionId];
-  if (!buildPrompt) {
-    throw new Error(`Unsupported actionId: ${actionId}`);
-  }
+  if (!buildPrompt) throw new Error(`Unsupported actionId: ${actionId}`);
+
+  const tone = typeof ctx.tone === "string" && SUPPORTED_TONES.includes(ctx.tone)
+    ? ctx.tone
+    : "default";
+
   const title = cleanTitle(ctx.videoTitle);
   const platform = ctx.platform && ctx.platform !== "unknown" ? ctx.platform : "social media";
 
-  return chatComplete(apiKey, {
-    system: "You are a sharp, concise social media content assistant. Follow the " +
-      "user's formatting instructions exactly and never add extra commentary.",
-    user: buildPrompt({
-      videoTitle: title,
-      platform,
-      videoSummary: ctx.videoSummary || null,
-      videoKeyPhrases: ctx.videoKeyPhrases || null,
-    }),
-    temperature: 0.7,
+  const baseUser = buildPrompt({
+    videoTitle: title,
+    platform,
+    videoSummary: ctx.videoSummary || null,
+    videoKeyPhrases: ctx.videoKeyPhrases || null,
   });
+
+  const toneDirective = TONE_DIRECTIVES[tone];
+  const user = toneDirective ? `${baseUser}\n\n${toneDirective}` : baseUser;
+
+  // Slightly higher temperature than single-variant because we WANT the
+  // three options to actually differ — a low-temperature model would
+  // produce three near-identical outputs and defeat the point.
+  const {text, usage} = await chatComplete(apiKey, {
+    system: "You are a sharp, concise social media content assistant. Follow " +
+      "the user's formatting instructions exactly and never add extra " +
+      "commentary. When asked for three variants, produce three DISTINCT, " +
+      "genuinely different options — not three rephrasings of the same idea.",
+    user,
+    temperature: 0.9,
+  });
+
+  return {
+    variants: parseVariants(text),
+    usage,
+    tone,
+  };
 }
 
-module.exports = {runRepurposeAction, SUPPORTED_ACTIONS, cleanTitle};
+module.exports = {
+  runRepurposeVariants,
+  runRepurposeAction: async (apiKey, actionId, ctx) => {
+    // Legacy single-variant path — kept so the old /processRepurposeAction
+    // endpoint keeps working for any client that hasn't updated yet.
+    const result = await runRepurposeVariants(apiKey, actionId, ctx);
+    const combined = result.variants[0] || "";
+    return {text: combined, usage: result.usage};
+  },
+  SUPPORTED_ACTIONS,
+  SUPPORTED_TONES,
+  cleanTitle,
+};

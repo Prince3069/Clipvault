@@ -2,7 +2,7 @@ name: medianest
 description: "MediaNest — Capture, organize, translate, and reuse your content, all in one place."
 publish_to: 'none'
 
-version: 1.0.2+3
+version: 1.0.2+5
 
 environment:
   sdk: ">=3.0.0 <4.0.0"
@@ -40,6 +40,9 @@ dependencies:
   speech_to_text: ^7.4.0
   image: ^4.9.2
   file_picker: ^11.0.3
+  google_sign_in: ^7.2.0
+  flutter_timezone: ^5.1.1
+  firebase_messaging: ^15.2.10
   # ffmpeg_kit_flutter_new: ^4.6.2
 
 dev_dependencies:

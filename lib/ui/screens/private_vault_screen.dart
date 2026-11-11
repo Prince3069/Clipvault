@@ -1266,7 +1266,7 @@ class _PinPadState extends State<_PinPad> {
                 ),
               ],
               const Spacer(flex: 2),
-              // Number Pad
+              // Number Pad - Fixed Alignment with Expanded
               ..._buildNumberPad(),
               const Spacer(flex: 1),
             ],
@@ -1286,34 +1286,38 @@ class _PinPadState extends State<_PinPad> {
 
     return rows.map((row) {
       return Padding(
-        padding: const EdgeInsets.only(bottom: AppSpacing.sm),
+        padding: const EdgeInsets.only(bottom: AppSpacing.md),
         child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
           children: row.map((c) {
             if (c.isEmpty) {
-              return const SizedBox(width: 80, height: 60);
+              return const Expanded(child: SizedBox());
             }
             final isBack = c == '⌫';
-            return GestureDetector(
-              onTap: isBack ? _onBackspace : () => _onDigit(c),
-              child: Container(
-                width: 80,
-                height: 60,
-                margin: const EdgeInsets.symmetric(horizontal: AppSpacing.sm),
-                decoration: BoxDecoration(
-                  color: isBack ? Colors.transparent : AppColors.surface,
-                  borderRadius: BorderRadius.circular(AppRadius.md),
-                  border: isBack ? null : Border.all(color: AppColors.border),
-                  boxShadow: isBack ? null : AppShadows.soft,
-                ),
-                child: Center(
-                  child: Text(
-                    c,
-                    style: TextStyle(
-                      fontSize: isBack ? 24 : 26,
-                      fontWeight: FontWeight.w600,
-                      color:
-                          isBack ? AppColors.textMuted : AppColors.textPrimary,
+            return Expanded(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8.0),
+                child: GestureDetector(
+                  onTap: isBack ? _onBackspace : () => _onDigit(c),
+                  child: Container(
+                    height: 64,
+                    decoration: BoxDecoration(
+                      color: isBack ? Colors.transparent : AppColors.surface,
+                      borderRadius: BorderRadius.circular(AppRadius.md),
+                      border:
+                          isBack ? null : Border.all(color: AppColors.border),
+                      boxShadow: isBack ? null : AppShadows.soft,
+                    ),
+                    child: Center(
+                      child: Text(
+                        c,
+                        style: TextStyle(
+                          fontSize: isBack ? 24 : 26,
+                          fontWeight: FontWeight.w600,
+                          color: isBack
+                              ? AppColors.textMuted
+                              : AppColors.textPrimary,
+                        ),
+                      ),
                     ),
                   ),
                 ),
@@ -1405,7 +1409,7 @@ class _FakePinSetupDialogState extends State<_FakePinSetupDialog> {
               ),
             ],
             const SizedBox(height: AppSpacing.lg),
-            // Number Pad (simplified)
+            // Number Pad
             ..._buildNumberPad(),
             const SizedBox(height: AppSpacing.md),
             TextButton(
@@ -1428,33 +1432,37 @@ class _FakePinSetupDialogState extends State<_FakePinSetupDialog> {
 
     return rows.map((row) {
       return Padding(
-        padding: const EdgeInsets.only(bottom: AppSpacing.sm),
+        padding: const EdgeInsets.only(bottom: 8),
         child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
           children: row.map((c) {
             if (c.isEmpty) {
-              return const SizedBox(width: 70, height: 50);
+              return const Expanded(child: SizedBox());
             }
             final isBack = c == '⌫';
-            return GestureDetector(
-              onTap: isBack ? _onBackspace : () => _onDigit(c),
-              child: Container(
-                width: 70,
-                height: 50,
-                margin: const EdgeInsets.symmetric(horizontal: AppSpacing.sm),
-                decoration: BoxDecoration(
-                  color: isBack ? Colors.transparent : AppColors.surfaceAlt,
-                  borderRadius: BorderRadius.circular(AppRadius.md),
-                  border: isBack ? null : Border.all(color: AppColors.border),
-                ),
-                child: Center(
-                  child: Text(
-                    c,
-                    style: TextStyle(
-                      fontSize: isBack ? 20 : 22,
-                      fontWeight: FontWeight.w600,
-                      color:
-                          isBack ? AppColors.textMuted : AppColors.textPrimary,
+            return Expanded(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 6.0),
+                child: GestureDetector(
+                  onTap: isBack ? _onBackspace : () => _onDigit(c),
+                  child: Container(
+                    height: 52,
+                    decoration: BoxDecoration(
+                      color: isBack ? Colors.transparent : AppColors.surfaceAlt,
+                      borderRadius: BorderRadius.circular(AppRadius.md),
+                      border:
+                          isBack ? null : Border.all(color: AppColors.border),
+                    ),
+                    child: Center(
+                      child: Text(
+                        c,
+                        style: TextStyle(
+                          fontSize: isBack ? 20 : 22,
+                          fontWeight: FontWeight.w600,
+                          color: isBack
+                              ? AppColors.textMuted
+                              : AppColors.textPrimary,
+                        ),
+                      ),
                     ),
                   ),
                 ),

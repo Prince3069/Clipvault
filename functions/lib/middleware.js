@@ -30,17 +30,31 @@ async function requireAuth(req, res, next) {
  * Attaches req.isPremium (bool) either way; use requirePremium() below to
  * hard-block non-premium requests, or just read req.isPremium for
  * different free/premium behavior in the same endpoint (e.g. translate).
+ *
+ * ALSO attaches req.userTimezone — the IANA name (e.g. "Africa/Lagos")
+ * that the client syncs via /updateTimezone. Every period-key computation
+ * in this file (daily free limits, monthly translate limit, daily Coach
+ * challenges) uses this instead of UTC, so "today" means "the user's
+ * local today." A user in Lagos at 11 PM is no longer already past
+ * midnight, and a user in Auckland at 1 AM is no longer still on
+ * yesterday's counter. Falls back to UTC for legacy accounts that
+ * haven't opened the app since the sync endpoint shipped — identical
+ * behavior to before this change, so nothing can regress.
  */
 async function attachPremiumStatus(req, res, next) {
   try {
     const db = admin.firestore();
     const doc = await db.collection("users").doc(req.user.uid).get();
-    const expiry = doc.data()?.premiumExpiry;
+    const data = doc.data() || {};
+    const expiry = data.premiumExpiry;
     req.isPremium = !!(expiry && expiry.toDate().getTime() > Date.now());
+    const tz = typeof data.timezone === "string" ? data.timezone : "";
+    req.userTimezone = tz || "UTC";
     next();
   } catch (e) {
     console.error("Premium status check failed:", e.message);
     req.isPremium = false;
+    req.userTimezone = "UTC";
     next();
   }
 }
@@ -54,16 +68,46 @@ function requirePremium(req, res, next) {
 }
 
 /**
+ * Returns {yyyy-mm-dd} for the given IANA timezone, using Intl.DateTimeFormat
+ * so the runtime handles DST, historical offsets, and non-hour-aligned
+ * zones correctly. Falls back to UTC if the timezone name is invalid —
+ * the previous behavior, so a corrupt value can never break a request.
+ */
+function dateKeyInZone(tz) {
+  try {
+    const fmt = new Intl.DateTimeFormat("en-CA", {
+      timeZone: tz || "UTC",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+    // en-CA renders as YYYY-MM-DD by default, which is exactly the key
+    // shape the rest of this file already uses.
+    return fmt.format(new Date());
+  } catch (_) {
+    return new Date().toISOString().slice(0, 10);
+  }
+}
+
+/** Returns {yyyy-mm} for the given IANA timezone. */
+function monthKeyInZone(tz) {
+  return dateKeyInZone(tz).slice(0, 7);
+}
+
+/**
  * Simple per-user, per-feature, per-day credit counter stored in Firestore
  * at users/{uid}/aiCredits/{feature}_{yyyy-mm-dd}. Returns true and
  * consumes one credit if the user is under their daily limit, false if
  * they've hit it. This is what actually protects your API budget — without
  * it, a single user (or a script hitting your endpoint directly) could run
  * unlimited paid AI calls on your dime.
+ *
+ * tz here is optional and defaulted to UTC for backward compatibility
+ * with any caller that hasn't been updated to pass req.userTimezone yet.
  */
-async function checkAndConsumeCredit(uid, feature, dailyLimit) {
+async function checkAndConsumeCredit(uid, feature, dailyLimit, tz = "UTC") {
   const db = admin.firestore();
-  const today = new Date().toISOString().slice(0, 10);
+  const today = dateKeyInZone(tz);
   const ref = db.collection("users").doc(uid).collection("aiCredits").doc(`${feature}_${today}`);
 
   return db.runTransaction(async (tx) => {
@@ -89,15 +133,14 @@ async function checkAndConsumeCredit(uid, feature, dailyLimit) {
  * instead of {yyyy-mm-dd} — for limits like "1 free translation, then
  * wait until next month," where a daily reset would give far more free
  * usage than intended.
- */
-/**
+ *
  * Checks the monthly allowance WITHOUT spending it. Call this before
  * attempting the AI call. Returns enough state to call
  * consumeMonthlyCredit() afterward — only if the call actually succeeds.
  */
-async function hasMonthlyCreditRemaining(uid, feature, monthlyLimit) {
+async function hasMonthlyCreditRemaining(uid, feature, monthlyLimit, tz = "UTC") {
   const db = admin.firestore();
-  const month = new Date().toISOString().slice(0, 7); // "2026-09"
+  const month = monthKeyInZone(tz);
   const ref = db.collection("users").doc(uid).collection("aiCredits").doc(`${feature}_${month}`);
   const snap = await ref.get();
   const used = snap.exists ? snap.data().count || 0 : 0;
@@ -147,12 +190,12 @@ async function consumeMonthlyCredit(check) {
 const BRANDING_FREE_PER_MONTH = 1;
 const BRANDING_INCLUDED_PER_MONTH_PRO = 30; // generous — costs ~nothing to grant, since there's no AI spend behind it
 
-async function checkBrandingAllowance(uid, isPremium) {
+async function checkBrandingAllowance(uid, isPremium, tz = "UTC") {
   if (!isPremium) {
-    const check = await hasMonthlyCreditRemaining(uid, "brandOverlay", BRANDING_FREE_PER_MONTH);
+    const check = await hasMonthlyCreditRemaining(uid, "brandOverlay", BRANDING_FREE_PER_MONTH, tz);
     return {allowed: check.allowed, tier: "free", check};
   }
-  const check = await hasMonthlyCreditRemaining(uid, "brandOverlayPro", BRANDING_INCLUDED_PER_MONTH_PRO);
+  const check = await hasMonthlyCreditRemaining(uid, "brandOverlayPro", BRANDING_INCLUDED_PER_MONTH_PRO, tz);
   return {allowed: check.allowed, tier: "pro_included", check};
 }
 
@@ -164,6 +207,8 @@ module.exports = {
   hasMonthlyCreditRemaining,
   consumeMonthlyCredit,
   checkBrandingAllowance,
+  dateKeyInZone,
+  monthKeyInZone,
   BRANDING_FREE_PER_MONTH,
   BRANDING_INCLUDED_PER_MONTH_PRO,
 };

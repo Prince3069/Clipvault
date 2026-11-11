@@ -14,6 +14,14 @@
       },
       "oauth_client": [
         {
+          "client_id": "304792745260-uih109pv60mfsbbqkk4tbk05bnbh6upn.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.princedevlabs.medianest",
+            "certificate_hash": "10eb5c63be295109005e815679b24a18e1b8b1c7"
+          }
+        },
+        {
           "client_id": "304792745260-48vc9e9o13aa8lcmhkkc7e9qh0lcggb5.apps.googleusercontent.com",
           "client_type": 3
         }

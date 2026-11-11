@@ -1,18 +1,20 @@
 // ui/screens/settings_screen.dart
 // REBRANDED: MediaNest
 // ADDED: Auto-sync to Cloud Vault toggle
+// ADDED: ACCOUNT section with live link status and a nudge card while unlinked
 // ignore_for_file: use_build_context_synchronously
 
-// import 'package:all_social_downloader/ui/screens/cloud_vault_screen.dart';
-// import 'package:all_social_downloader/ui/screens/premium_screen.dart';
 import 'package:flutter/material.dart';
-import 'package:medianest/ui/screens/cloud_vault_screen.dart';
-import 'package:medianest/ui/screens/premium_screen.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:provider/provider.dart';
 import '../../providers/settings_provider.dart';
 import '../../providers/premium_provider.dart';
+import '../../services/account_service.dart';
 import '../../services/permission_service.dart';
 import '../themes/app_theme.dart';
+import 'account_link_screen.dart';
+import 'cloud_vault_screen.dart';
+import 'premium_screen.dart';
 import 'privacy_policy_screen.dart';
 import 'terms_screen.dart';
 
@@ -24,6 +26,7 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   final PermissionService _ps = PermissionService();
+  final AccountService _account = AccountService();
   PermissionState? _perm;
   bool _loading = true;
 
@@ -41,6 +44,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _perm = s;
         _loading = false;
       });
+    }
+  }
+
+  Future<void> _openLinkScreen() async {
+    final result = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(builder: (_) => const AccountLinkScreen()),
+    );
+    if (result == true && mounted) {
+      // The link happened — rebuild so the ACCOUNT section reflects the
+      // new state (email shown, nudge card gone). FirebaseAuth.currentUser
+      // was updated synchronously by linkWithCredential, so a simple
+      // setState is enough.
+      setState(() {});
     }
   }
 
@@ -70,7 +87,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     children: [
                       const SizedBox(height: 4),
                       _buildAppCard(),
-                      const SizedBox(height: 28),
+                      const SizedBox(height: 20),
+                      _accountSection(),
+                      const SizedBox(height: 24),
                       _permissionsSection(),
                       const SizedBox(height: 24),
                       _downloadSection(settings),
@@ -150,6 +169,211 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   fontSize: 11,
                   fontWeight: FontWeight.w700)),
         ),
+      ]),
+    );
+  }
+
+  // ─── Account section ─────────────────────────────────────────────────────
+
+  Widget _accountSection() {
+    // Rebuild when auth changes — linkWithCredential replaces currentUser,
+    // and there's no ChangeNotifier emitting for that, so listen to the
+    // stream instead of relying on setState alone.
+    return StreamBuilder<User?>(
+      stream: FirebaseAuth.instance.authStateChanges(),
+      builder: (context, snapshot) {
+        final user = snapshot.data ?? FirebaseAuth.instance.currentUser;
+        final isAnonymous = user?.isAnonymous ?? true;
+        final email = user?.email ?? '';
+
+        // Determine provider label from providerData. For a linked Google
+        // account this reads "Google"; for email link it reads
+        // "Email & password".
+        String provider = '';
+        if (user != null && !isAnonymous) {
+          final ids = user.providerData.map((p) => p.providerId).toList();
+          if (ids.contains('google.com')) {
+            provider = 'Google';
+          } else if (ids.contains('password')) {
+            provider = 'Email & password';
+          } else if (ids.isNotEmpty) {
+            provider = ids.first;
+          }
+        }
+
+        return Column(
+          children: [
+            if (isAnonymous) _buildLinkNudgeCard(),
+            if (isAnonymous) const SizedBox(height: 12),
+            _section(
+              'ACCOUNT',
+              Icons.person_outline_rounded,
+              isAnonymous ? AppColors.warning : AppColors.success,
+              Column(children: [
+                _accountStatusRow(
+                  isAnonymous: isAnonymous,
+                  email: email,
+                  provider: provider,
+                ),
+                if (isAnonymous) ...[
+                  _div(),
+                  _tile(
+                    icon: Icons.shield_moon_rounded,
+                    color: AppColors.primary,
+                    title: 'Save your account',
+                    sub: 'Link Google or email so you keep your library',
+                    onTap: _openLinkScreen,
+                  ),
+                ],
+              ]),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  /// A deliberately prominent (but dismissible-by-navigation, not
+  /// dismissible-by-tap-the-X) nudge card that appears only while the
+  /// account is anonymous. Shows the small "Save your account" idea right
+  /// next to a summary of what's at stake — this is the surface most
+  /// likely to actually get people to complete linking, which is why it's
+  /// more visual than a plain list row.
+  Widget _buildLinkNudgeCard() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: AppColors.warning.withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: AppColors.warning.withValues(alpha: 0.25),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: AppColors.warning.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Icon(
+                  Icons.warning_amber_rounded,
+                  color: AppColors.warning,
+                  size: 20,
+                ),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Text(
+                  'Your account only lives on this phone',
+                  style: TextStyle(
+                    color: AppColors.textPrimary,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                    height: 1.3,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          const Text(
+            'Reinstall the app or switch phones, and your library, streak, '
+            'and Pro subscription go with it. Link an account in under a '
+            'minute to keep them safe.',
+            style: TextStyle(
+              color: AppColors.textSecondary,
+              fontSize: 12,
+              height: 1.5,
+            ),
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: _openLinkScreen,
+              icon: const Icon(Icons.link_rounded, size: 18),
+              label: const Text('Link an account'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.warning,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _accountStatusRow({
+    required bool isAnonymous,
+    required String email,
+    required String provider,
+  }) {
+    final Color iconColor = isAnonymous ? AppColors.warning : AppColors.success;
+    final IconData iconData = isAnonymous
+        ? Icons.person_outline_rounded
+        : Icons.verified_user_rounded;
+    final String title = isAnonymous
+        ? 'Anonymous account'
+        : (email.isNotEmpty ? email : 'Signed in');
+    final String subtitle = isAnonymous
+        ? 'Link Google or email to keep your data safe'
+        : (provider.isNotEmpty ? 'Linked with $provider' : 'Account linked');
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
+      child: Row(children: [
+        Container(
+          width: 36,
+          height: 36,
+          decoration: BoxDecoration(
+            color: iconColor.withValues(alpha: 0.10),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Icon(iconData, color: iconColor, size: 18),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child:
+              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(
+              title,
+              style: const TextStyle(
+                color: AppColors.textPrimary,
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            const SizedBox(height: 2),
+            Text(
+              subtitle,
+              style: const TextStyle(
+                color: AppColors.textMuted,
+                fontSize: 12,
+              ),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ]),
+        ),
+        if (!isAnonymous)
+          const Icon(
+            Icons.check_circle_rounded,
+            color: AppColors.success,
+            size: 20,
+          ),
       ]),
     );
   }
@@ -252,7 +476,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  // ─── Cloud section (NEW) ──────────────────────────────────────────────────
+  // ─── Cloud section ───────────────────────────────────────────────────────
 
   Widget _cloudSection(SettingsProvider settings) {
     return Consumer<PremiumProvider>(
@@ -288,7 +512,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   : '3GB synced storage · Pro',
               onTap: isPremium
                   ? () {
-                      // Navigate to Cloud Vault
                       Navigator.push(
                         context,
                         MaterialPageRoute(
@@ -400,7 +623,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
         Padding(
           padding: const EdgeInsets.only(bottom: 10, left: 2),
           child: Row(children: [
-            // Colored left accent bar
             Container(
               width: 3,
               height: 14,

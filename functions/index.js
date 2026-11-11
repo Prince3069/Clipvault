@@ -1,10 +1,14 @@
 // functions/index.js
 //
 // Single Cloud Function named "apiV1" (2nd gen, HTTPS) — matches the URL
-// ai_service.dart already builds. Every route below is one the Flutter
-// client already calls, plus two new Coach endpoints and (in this version)
-// returning the raw transcript from /analyzeVideo so the Smart Translator
-// Video tab can translate real speech instead of a summary.
+// ai_service.dart already builds.
+//
+// New in this version:
+//   • /processRepurposeVariants — multi-variant + tone-aware Repurpose
+//   • /registerFcmToken — stores a device's push token for streak reminders
+//   • /getDailyChallenge now gathers recent activity so the Coach prompt
+//     can reflect what the person actually does
+//   • rate limiting applied to every paid endpoint via lib/rateLimit.js
 //
 // SECRETS: never hardcode API keys. Declared with defineSecret() and read
 // at request time via `openaiKey.value()`.
@@ -14,10 +18,24 @@ const {defineSecret} = require("firebase-functions/params");
 const admin = require("firebase-admin");
 const express = require("express");
 const cors = require("cors");
+const multer = require("multer"); // ADDED: For direct multipart video uploads
 
-const {requireAuth, attachPremiumStatus, checkAndConsumeCredit, hasMonthlyCreditRemaining, consumeMonthlyCredit, checkBrandingAllowance, BRANDING_FREE_PER_MONTH, BRANDING_INCLUDED_PER_MONTH_PRO} = require("./lib/middleware");
+const {
+  requireAuth,
+  attachPremiumStatus,
+  hasMonthlyCreditRemaining,
+  consumeMonthlyCredit,
+  checkBrandingAllowance,
+  dateKeyInZone,
+  monthKeyInZone,
+} = require("./lib/middleware");
 const {chatComplete} = require("./lib/openai");
-const {runRepurposeAction, SUPPORTED_ACTIONS} = require("./lib/repurpose");
+const {
+  runRepurposeVariants,
+  runRepurposeAction,
+  SUPPORTED_ACTIONS,
+  SUPPORTED_TONES,
+} = require("./lib/repurpose");
 const {
   hasBudgetRemaining,
   recordSpend,
@@ -38,91 +56,103 @@ const {
   WHISPER_PRICE_PER_MINUTE_USD,
 } = require("./lib/videoAnalysis");
 const {generateDailyChallenge} = require("./lib/contentCoach");
+const {checkRateLimit} = require("./lib/rateLimit");
 const crypto = require("crypto");
 
-/**
- * Analyzes a video the app has uploaded to its OWN private temp path
- * (users/{uid}/analysis_temp/…) — never a URL supplied by the client.
- *
- * Returns {analysisKey, summary, keyPhrases, transcript, durationMinutes}.
- * The transcript is included because the Smart Translator Video tab needs
- * the raw words to translate (a summary would lose them); Repurpose only
- * reads summary/keyPhrases and ignores the transcript. Cached per unique
- * video bytes, so analyzing the same video for Translator and then for
- * Repurpose (or vice versa) only pays for Whisper once.
- */
-async function analyzeUploadedVideo(uid, storagePath, openaiKey) {
-  const prefix = `users/${uid}/analysis_temp/`;
-  if (typeof storagePath !== "string" || !storagePath.startsWith(prefix) ||
-      storagePath.includes("..") || storagePath.length > 200) {
-    throw Object.assign(new Error("Invalid upload path"), {httpStatus: 400});
-  }
-
-  const file = admin.storage().bucket().file(storagePath);
+function validateTimezone(name) {
+  if (typeof name !== "string") return null;
+  const trimmed = name.trim();
+  if (trimmed.length === 0 || trimmed.length > 60) return null;
   try {
-    const [meta] = await file.getMetadata();
-    const size = Number(meta.size);
-    if (!size || size > MAX_VIDEO_BYTES) {
-      throw Object.assign(new Error("Video is too large to analyze (24MB limit)"), {httpStatus: 413});
-    }
-    const [buffer] = await file.download();
-
-    const analysisKey = crypto.createHash("sha256").update(buffer).digest("hex");
-    const analysisRef = db.collection("users").doc(uid)
-      .collection("videoAnalysis").doc(analysisKey);
-
-    const cached = await analysisRef.get();
-    if (cached.exists) {
-      const c = cached.data();
-      return {
-        analysisKey,
-        summary: c.summary,
-        keyPhrases: c.keyPhrases,
-        // Legacy entries (analyzed before this version) may not have the
-        // transcript stored — return null in that case, which the client
-        // already tolerates.
-        transcript: c.transcript || null,
-        durationMinutes: c.durationMinutes,
-      };
-    }
-
-    const worstCaseUsd = MAX_ANALYSIS_MINUTES * WHISPER_PRICE_PER_MINUTE_USD + 0.002;
-    const gate = await hasBudgetRemaining(uid, worstCaseUsd);
-    if (!gate.allowed) {
-      throw Object.assign(
-        new Error("Not enough AI budget left for video analysis"),
-        {httpStatus: 429, canBuyCredits: true},
-      );
-    }
-
-    const {transcript, durationMinutes} = await transcribeVideoBytes(openaiKey, buffer);
-    const {summary, keyPhrases, usage} = await summarizeTranscript(openaiKey, transcript);
-    await recordVideoAnalysisSpend(uid, durationMinutes, usage);
-
-    // Cap stored transcript at 50KB as a sanity guard (10-min video @150wpm
-    // is ~7.5KB, so this is only hit by pathological cases) — Firestore
-    // documents are capped at 1MB.
-    const safeTranscript = typeof transcript === "string" && transcript.length > 50000
-      ? transcript.slice(0, 50000)
-      : transcript;
-
-    await analysisRef.set({
-      summary,
-      keyPhrases,
-      transcript: safeTranscript,
-      durationMinutes,
-      analyzedAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-    return {analysisKey, summary, keyPhrases, transcript: safeTranscript, durationMinutes};
-  } finally {
-    await file.delete().catch(() => {});
+    new Intl.DateTimeFormat("en-CA", {timeZone: trimmed});
+    return trimmed;
+  } catch (_) {
+    return null;
   }
+}
+
+/**
+ * Wraps a handler with a per-user rate limit check. If the limit is
+ * exceeded, responds 429 with retryAfterSeconds and a clear message.
+ * Applied only to endpoints that cost real money or are worth spamming.
+ */
+function withRateLimit(feature, handler) {
+  return async (req, res, next) => {
+    try {
+      const gate = await checkRateLimit(req.user.uid, feature);
+      if (!gate.allowed) {
+        res.set("Retry-After", String(gate.retryAfterSeconds || 5));
+        return res.status(429).json({
+          error: "Slow down a moment — try again shortly.",
+          retryAfterSeconds: gate.retryAfterSeconds,
+          rateLimited: true,
+        });
+      }
+    } catch (e) {
+      // Rate-limiter failure must not break the feature. Fail open.
+      console.error("Rate limit check failed, allowing request:", e.message);
+    }
+    return handler(req, res, next);
+  };
+}
+
+// FIXED: Accepts the video buffer directly instead of downloading from Firebase Storage
+async function analyzeUploadedVideo(uid, buffer, openaiKey) {
+  if (!buffer || buffer.length === 0) {
+    throw Object.assign(new Error("No video data received"), {httpStatus: 400});
+  }
+  const size = buffer.length;
+  if (size > MAX_VIDEO_BYTES) {
+    throw Object.assign(new Error("Video is too large to analyze (24MB limit)"), {httpStatus: 413});
+  }
+
+  const analysisKey = crypto.createHash("sha256").update(buffer).digest("hex");
+  const analysisRef = db.collection("users").doc(uid)
+    .collection("videoAnalysis").doc(analysisKey);
+
+  const cached = await analysisRef.get();
+  if (cached.exists) {
+    const c = cached.data();
+    return {
+      analysisKey,
+      summary: c.summary,
+      keyPhrases: c.keyPhrases,
+      transcript: c.transcript || null,
+      durationMinutes: c.durationMinutes,
+    };
+  }
+
+  const worstCaseUsd = MAX_ANALYSIS_MINUTES * WHISPER_PRICE_PER_MINUTE_USD + 0.002;
+  const gate = await hasBudgetRemaining(uid, worstCaseUsd);
+  if (!gate.allowed) {
+    throw Object.assign(
+      new Error("Not enough AI budget left for video analysis"),
+      {httpStatus: 429, canBuyCredits: true},
+    );
+  }
+
+  const {transcript, durationMinutes} = await transcribeVideoBytes(openaiKey, buffer);
+  const {summary, keyPhrases, usage} = await summarizeTranscript(openaiKey, transcript);
+  await recordVideoAnalysisSpend(uid, durationMinutes, usage);
+
+  const safeTranscript = typeof transcript === "string" && transcript.length > 50000
+    ? transcript.slice(0, 50000)
+    : transcript;
+
+  await analysisRef.set({
+    summary,
+    keyPhrases,
+    transcript: safeTranscript,
+    durationMinutes,
+    analyzedAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+  
+  return {analysisKey, summary, keyPhrases, transcript: safeTranscript, durationMinutes};
 }
 
 admin.initializeApp();
 const db = admin.firestore();
 
-// ─── Secrets ────────────────────────────────────────────────────────────
 const openaiKey = defineSecret("OPENAI_API_KEY");
 const anthropicKey = defineSecret("ANTHROPIC_API_KEY");
 const deepseekKey = defineSecret("DEEPSEEK_API_KEY");
@@ -131,15 +161,20 @@ const deepgramKey = defineSecret("DEEPGRAM_API_KEY");
 
 const ALL_SECRETS = [openaiKey, anthropicKey, deepseekKey, replicateKey, deepgramKey];
 
-// ─── Free-tier limits ────────────────────────────────────────────────────
 const LIMITS = {
-  translateText: {free: 1}, // per calendar MONTH
-  processRepurposeAction: {free: 0}, // fully premium-gated
+  translateText: {free: 1},
+  processRepurposeAction: {free: 0},
 };
 
 const app = express();
 app.use(cors({origin: true}));
 app.use(express.json({limit: "2mb"}));
+
+// ADDED: Multer configuration for in-memory file uploads
+const upload = multer({ 
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_VIDEO_BYTES } 
+});
 
 // ─── Health check ────────────────────────────────────────────────────────
 app.get("/health", (req, res) => {
@@ -149,6 +184,52 @@ app.get("/health", (req, res) => {
 // ─── Premium status ─────────────────────────────────────────────────────
 app.get("/verifyPremium", requireAuth, attachPremiumStatus, (req, res) => {
   res.json({isPremium: req.isPremium});
+});
+
+// ─── Timezone sync ──────────────────────────────────────────────────────
+app.post("/updateTimezone", requireAuth, async (req, res) => {
+  try {
+    const tz = validateTimezone(req.body && req.body.timezone);
+    if (!tz) return res.status(400).json({error: "Invalid timezone"});
+    await db.collection("users").doc(req.user.uid).set(
+      {timezone: tz, timezoneUpdatedAt: admin.firestore.FieldValue.serverTimestamp()},
+      {merge: true},
+    );
+    res.json({success: true, timezone: tz});
+  } catch (e) {
+    console.error("updateTimezone error:", e);
+    res.status(500).json({error: "Could not update timezone"});
+  }
+});
+
+// ─── FCM token registration ─────────────────────────────────────────────
+// The client registers (and re-registers) its FCM token here. A user can
+// have multiple tokens — one per device — so this stores an array of
+// tokens, deduplicated. When the server wants to send a push, it iterates
+// every token and prunes any that return UNREGISTERED on send.
+app.post("/registerFcmToken", requireAuth, async (req, res) => {
+  try {
+    const {token, platform} = req.body || {};
+    if (typeof token !== "string" || token.length < 20 || token.length > 500) {
+      return res.status(400).json({error: "Invalid token"});
+    }
+    const cleanPlatform = typeof platform === "string" && platform.length < 20
+      ? platform : "unknown";
+
+    const userRef = db.collection("users").doc(req.user.uid);
+    await userRef.set({
+      fcmTokens: admin.firestore.FieldValue.arrayUnion(token),
+      [`fcmTokenMeta.${token}`]: {
+        platform: cleanPlatform,
+        registeredAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+    }, {merge: true});
+
+    res.json({success: true});
+  } catch (e) {
+    console.error("registerFcmToken error:", e);
+    res.status(500).json({error: "Could not register token"});
+  }
 });
 
 // ─── AI credit usage ─────────────────────────────────────────────────────
@@ -165,8 +246,9 @@ app.get("/getAICredits", requireAuth, attachPremiumStatus, async (req, res) => {
       });
     }
 
-    const today = new Date().toISOString().slice(0, 10);
-    const month = new Date().toISOString().slice(0, 7);
+    const tz = req.userTimezone;
+    const today = dateKeyInZone(tz);
+    const month = monthKeyInZone(tz);
     const features = Object.keys(LIMITS);
     const used = {};
     for (const feature of features) {
@@ -183,7 +265,7 @@ app.get("/getAICredits", requireAuth, attachPremiumStatus, async (req, res) => {
     for (const feature of features) {
       limits[feature] = LIMITS[feature].free;
     }
-    res.json({date: today, month, used, limits, isPremium: false});
+    res.json({date: today, month, used, limits, isPremium: false, timezone: tz});
   } catch (e) {
     console.error("getAICredits error:", e);
     res.status(500).json({error: "Could not load AI credit usage"});
@@ -193,7 +275,7 @@ app.get("/getAICredits", requireAuth, attachPremiumStatus, async (req, res) => {
 // ─── Branding/overlay feature (Quick Edit's replacement) ────────────────
 app.get("/checkBrandingAllowance", requireAuth, attachPremiumStatus, async (req, res) => {
   try {
-    const gate = await checkBrandingAllowance(req.user.uid, req.isPremium);
+    const gate = await checkBrandingAllowance(req.user.uid, req.isPremium, req.userTimezone);
     if (gate.allowed) {
       return res.json({allowed: true, tier: gate.tier});
     }
@@ -221,7 +303,7 @@ app.get("/checkBrandingAllowance", requireAuth, attachPremiumStatus, async (req,
 
 app.post("/consumeBrandingUse", requireAuth, attachPremiumStatus, async (req, res) => {
   try {
-    const gate = await checkBrandingAllowance(req.user.uid, req.isPremium);
+    const gate = await checkBrandingAllowance(req.user.uid, req.isPremium, req.userTimezone);
     if (gate.allowed) {
       await consumeMonthlyCredit(gate.check);
       return res.json({success: true, tier: gate.tier});
@@ -248,7 +330,7 @@ app.post(
   "/translateText",
   requireAuth,
   attachPremiumStatus,
-  async (req, res) => {
+  withRateLimit("translateText", async (req, res) => {
     try {
       const {text, targetLanguage, sourceLanguage} = req.body;
       if (!text || !targetLanguage) {
@@ -269,7 +351,8 @@ app.post(
           });
         }
       } else {
-        freeCheck = await hasMonthlyCreditRemaining(req.user.uid, "translateText", LIMITS.translateText.free);
+        freeCheck = await hasMonthlyCreditRemaining(
+          req.user.uid, "translateText", LIMITS.translateText.free, req.userTimezone);
         if (!freeCheck.allowed) {
           return res.status(429).json({
             error: "Your free translation for this month is used — upgrade to Pro for unlimited, or wait until next month for another free one.",
@@ -307,7 +390,7 @@ app.post(
       console.error("translateText error:", e);
       res.status(502).json({error: `Translation service error: ${e.message || "please try again"}`});
     }
-  },
+  }),
 );
 
 // ─── Detect language ─────────────────────────────────────────────────────
@@ -315,7 +398,7 @@ app.post(
   "/detectLanguage",
   requireAuth,
   attachPremiumStatus,
-  async (req, res) => {
+  withRateLimit("detectLanguage", async (req, res) => {
     try {
       if (!req.isPremium) {
         return res.status(402).json({error: "Auto-detect language is a Pro feature"});
@@ -336,15 +419,90 @@ app.post(
       console.error("detectLanguage error:", e);
       res.status(502).json({error: `Language detection error: ${e.message || "please try again"}`});
     }
-  },
+  }),
 );
 
-// ─── Repurpose Studio ─────────────────────────────────────────────────────
+// ─── Repurpose Studio — multi-variant, tone-aware ───────────────────────
+app.post(
+  "/processRepurposeVariants",
+  requireAuth,
+  attachPremiumStatus,
+  withRateLimit("processRepurposeVariants", async (req, res) => {
+    try {
+      const {actionId, videoTitle, platform, analysisKey, tone} = req.body;
+      if (!actionId || !SUPPORTED_ACTIONS.includes(actionId)) {
+        return res.status(400).json({
+          error: `Unsupported actionId. Supported: ${SUPPORTED_ACTIONS.join(", ")}`,
+        });
+      }
+      if (tone && !SUPPORTED_TONES.includes(tone)) {
+        return res.status(400).json({
+          error: `Unsupported tone. Supported: ${SUPPORTED_TONES.join(", ")}`,
+        });
+      }
+
+      if (!req.isPremium) {
+        return res.status(402).json({error: "Upgrade to Pro to use Repurpose Studio"});
+      }
+
+      const budget = await hasBudgetRemaining(req.user.uid);
+      if (!budget.allowed) {
+        return res.status(429).json({
+          error: "This billing period's AI budget is used up. Buy more credits to keep going, or it renews automatically with your next payment.",
+          canBuyCredits: true,
+        });
+      }
+
+      let videoSummary = null;
+      let videoKeyPhrases = null;
+      if (typeof analysisKey === "string" && /^[a-f0-9]{64}$/.test(analysisKey)) {
+        try {
+          const doc = await db.collection("users").doc(req.user.uid)
+            .collection("videoAnalysis").doc(analysisKey).get();
+          if (doc.exists) {
+            videoSummary = doc.data().summary || null;
+            videoKeyPhrases = doc.data().keyPhrases || null;
+          }
+        } catch (e) {
+          console.error("Analysis lookup failed, falling back to title-only:", e.message);
+        }
+      }
+
+      const result = await runRepurposeVariants(openaiKey.value(), actionId, {
+        videoTitle,
+        platform,
+        videoSummary,
+        videoKeyPhrases,
+        tone,
+      });
+
+      const spent = await recordSpend(req.user.uid, result.usage);
+      const remainingUsd = Math.max(0, budget.remainingUsd - spent);
+
+      db.collection("users").doc(req.user.uid).collection("events").add({
+        event: "repurpose_action_completed",
+        properties: {actionId, tone: result.tone, variantCount: result.variants.length},
+        timestamp: admin.firestore.FieldValue.serverTimestamp(),
+      }).catch((e) => console.error("Coach event log failed (non-critical):", e.message));
+
+      res.json({
+        variants: result.variants,
+        tone: result.tone,
+        remainingCredits: usdToCredits(remainingUsd),
+      });
+    } catch (e) {
+      console.error("processRepurposeVariants error:", e);
+      res.status(502).json({error: `AI generation failed: ${e.message || "please try again"}`});
+    }
+  }),
+);
+
+// ─── Repurpose Studio — legacy single-variant (kept for old clients) ────
 app.post(
   "/processRepurposeAction",
   requireAuth,
   attachPremiumStatus,
-  async (req, res) => {
+  withRateLimit("processRepurposeAction", async (req, res) => {
     try {
       const {actionId, videoTitle, platform, analysisKey} = req.body;
       if (!actionId || !SUPPORTED_ACTIONS.includes(actionId)) {
@@ -404,7 +562,7 @@ app.post(
       console.error("processRepurposeAction error:", e);
       res.status(502).json({error: `AI generation failed: ${e.message || "please try again"}`});
     }
-  },
+  }),
 );
 
 // ─── Redeem a purchased credit pack ─────────────────────────────────────
@@ -537,10 +695,15 @@ app.get("/getLibraryStats", requireAuth, async (req, res) => {
   }
 });
 
-// ─── AI Content Coach — real daily challenges ───────────────────────────
-app.get("/getDailyChallenge", requireAuth, async (req, res) => {
+// ─── AI Content Coach — real daily challenges (activity-aware) ─────────
+//
+// Now gathers recent activity before generating. The activity block is
+// derived from downloadLog (last 30 days) and events (repurpose actions),
+// so the challenge reflects what the person actually does on the app.
+app.get("/getDailyChallenge", requireAuth, attachPremiumStatus,
+  withRateLimit("getDailyChallenge", async (req, res) => {
   try {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = dateKeyInZone(req.userTimezone);
     const userRef = db.collection("users").doc(req.user.uid);
     const challengeRef = userRef.collection("coachChallenges").doc(today);
 
@@ -554,6 +717,58 @@ app.get("/getDailyChallenge", requireAuth, async (req, res) => {
     const niche = userData.coachNiche || "general content creation";
     const streakDays = userData.coachStreak || 0;
 
+    // ─── Gather 30-day activity ────────────────────────────────────────
+    // Both queries are cheap (indexed on the collection by timestamp in
+    // the downloadLog case and by the event field in the events case),
+    // and both are bounded to 30 days. If either fails, the challenge is
+    // still generated — activity is enrichment, not a dependency.
+    let activity = null;
+    try {
+      const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+
+      const downloadSnap = await userRef.collection("downloadLog")
+        .where("timestamp", ">=", thirtyDaysAgo)
+        .limit(200)
+        .get();
+
+      const platformCounts = {};
+      downloadSnap.forEach((d) => {
+        const p = d.data().platform || "unknown";
+        platformCounts[p] = (platformCounts[p] || 0) + 1;
+      });
+
+      const sortedPlatforms = Object.entries(platformCounts)
+        .sort((a, b) => b[1] - a[1]);
+      const topPlatform = sortedPlatforms.length > 0 ? sortedPlatforms[0][0] : null;
+      const otherPlatforms = sortedPlatforms.slice(1, 3).map((p) => p[0]);
+
+      const repurposeSnap = await userRef.collection("events")
+        .where("event", "==", "repurpose_action_completed")
+        .where("timestamp", ">=", thirtyDaysAgo)
+        .limit(200)
+        .get();
+
+      const actionCounts = {};
+      repurposeSnap.forEach((e) => {
+        const actionId = (e.data().properties || {}).actionId || "unknown";
+        actionCounts[actionId] = (actionCounts[actionId] || 0) + 1;
+      });
+      const sortedActions = Object.entries(actionCounts)
+        .sort((a, b) => b[1] - a[1]);
+      const topRepurposeAction = sortedActions.length > 0 ? sortedActions[0][0] : null;
+
+      activity = {
+        topPlatform,
+        platformCounts,
+        otherPlatforms,
+        totalDownloads: downloadSnap.size,
+        topRepurposeAction,
+        repurposeCount: repurposeSnap.size,
+      };
+    } catch (e) {
+      console.error("Activity aggregation failed (non-critical):", e.message);
+    }
+
     const budget = await hasBudgetRemaining(req.user.uid, 0.001);
     if (!budget.allowed) {
       return res.status(429).json({
@@ -562,7 +777,8 @@ app.get("/getDailyChallenge", requireAuth, async (req, res) => {
       });
     }
 
-    const challenge = await generateDailyChallenge(openaiKey.value(), niche, streakDays);
+    const challenge = await generateDailyChallenge(
+      openaiKey.value(), niche, streakDays, activity);
     const spent = await recordSpend(req.user.uid, challenge.usage);
 
     const toSave = {
@@ -581,11 +797,11 @@ app.get("/getDailyChallenge", requireAuth, async (req, res) => {
     console.error("getDailyChallenge error:", e);
     res.status(502).json({error: "Could not generate today's challenge"});
   }
-});
+}));
 
-app.post("/completeDailyChallenge", requireAuth, async (req, res) => {
+app.post("/completeDailyChallenge", requireAuth, attachPremiumStatus, async (req, res) => {
   try {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = dateKeyInZone(req.userTimezone);
     const userRef = db.collection("users").doc(req.user.uid);
     const challengeRef = userRef.collection("coachChallenges").doc(today);
 
@@ -599,7 +815,7 @@ app.post("/completeDailyChallenge", requireAuth, async (req, res) => {
     }
 
     if (challenge.verifiable && challenge.verifyFeature) {
-      const startOfDay = new Date(`${today}T00:00:00.000Z`);
+      const startOfDay = startOfLocalDay(req.userTimezone);
       let verified = false;
 
       if (challenge.verifyFeature === "download") {
@@ -639,7 +855,31 @@ app.post("/completeDailyChallenge", requireAuth, async (req, res) => {
   }
 });
 
-// ─── AI Content Coach — profile (streak, points, niche, goal) ───────────
+function startOfLocalDay(tz) {
+  try {
+    const now = new Date();
+    const ymd = dateKeyInZone(tz).split("-").map(Number);
+    const utcMidnight = Date.UTC(ymd[0], ymd[1] - 1, ymd[2]);
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: tz,
+      timeZoneName: "shortOffset",
+      hour: "2-digit",
+    }).formatToParts(now);
+    let offsetMinutes = 0;
+    const tzName = parts.find((p) => p.type === "timeZoneName")?.value || "";
+    const m = tzName.match(/GMT([+-])(\d{1,2})(?::(\d{2}))?/);
+    if (m) {
+      const sign = m[1] === "-" ? -1 : 1;
+      offsetMinutes = sign * (parseInt(m[2], 10) * 60 + (m[3] ? parseInt(m[3], 10) : 0));
+    }
+    return new Date(utcMidnight - offsetMinutes * 60 * 1000);
+  } catch (_) {
+    const ymd = new Date().toISOString().slice(0, 10).split("-").map(Number);
+    return new Date(Date.UTC(ymd[0], ymd[1] - 1, ymd[2]));
+  }
+}
+
+// ─── AI Content Coach — profile ─────────────────────────────────────────
 app.get("/getCoachProfile", requireAuth, async (req, res) => {
   try {
     const doc = await db.collection("users").doc(req.user.uid).get();
@@ -657,7 +897,6 @@ app.get("/getCoachProfile", requireAuth, async (req, res) => {
   }
 });
 
-// ─── AI Content Coach — save niche/goal/name ─────────────────────────────
 app.post("/saveCoachProfile", requireAuth, async (req, res) => {
   try {
     const {niche, goal, name} = req.body || {};
@@ -738,13 +977,25 @@ app.get("/getDownloadStats", requireAuth, async (req, res) => {
 const notImplemented = (name) => (req, res) => {
   res.status(501).json({error: `${name} is not implemented on the server yet`});
 };
-app.post("/analyzeVideo", requireAuth, attachPremiumStatus, async (req, res) => {
+app.get("/getAnalyzedVideos", requireAuth, notImplemented("getAnalyzedVideos"));
+app.get("/getLibraryStats2", requireAuth, notImplemented("getLibraryStats2"));
+app.post("/suggestCollections", requireAuth, notImplemented("suggestCollections"));
+app.get("/getCloudVaultFiles", requireAuth, notImplemented("getCloudVaultFiles"));
+app.post("/deleteCloudFile", requireAuth, notImplemented("deleteCloudFile"));
+
+// FIXED: Using multer to parse the uploaded video bytes directly
+app.post("/analyzeVideo", requireAuth, attachPremiumStatus, upload.single("video"),
+  withRateLimit("analyzeVideo", async (req, res) => {
   try {
     if (!req.isPremium) {
       return res.status(402).json({error: "Upgrade to Pro to analyze videos"});
     }
+    if (!req.file) {
+      return res.status(400).json({error: "No video file uploaded"});
+    }
+    
     const analysis = await analyzeUploadedVideo(
-      req.user.uid, req.body && req.body.storagePath, openaiKey.value(),
+      req.user.uid, req.file.buffer, openaiKey.value(),
     );
     res.json(analysis);
   } catch (e) {
@@ -754,11 +1005,6 @@ app.post("/analyzeVideo", requireAuth, attachPremiumStatus, async (req, res) => 
       canBuyCredits: e.canBuyCredits || false,
     });
   }
-});
-app.get("/getAnalyzedVideos", requireAuth, notImplemented("getAnalyzedVideos"));
-app.get("/getLibraryStats2", requireAuth, notImplemented("getLibraryStats2"));
-app.post("/suggestCollections", requireAuth, notImplemented("suggestCollections"));
-app.get("/getCloudVaultFiles", requireAuth, notImplemented("getCloudVaultFiles"));
-app.post("/deleteCloudFile", requireAuth, notImplemented("deleteCloudFile"));
+}));
 
 exports.apiV1 = onRequest({secrets: ALL_SECRETS, region: "us-central1"}, app);
