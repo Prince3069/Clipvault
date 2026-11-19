@@ -112,6 +112,13 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // ── App config (server-only) ───────────────────────────────────────────
+    // config/proAccess holds the tester email list. Edit it in the
+    // Firebase Console; the app can never read or change it.
+    match /config/{docId} {
+      allow read, write: if false;
+    }
+
     // ── Default: deny everything not explicitly allowed above ─────────────
     match /{document=**} {
       allow read, write: if false;

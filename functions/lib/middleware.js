@@ -37,29 +37,66 @@ const OWNER_EMAILS = [
 const OWNER_GRANT_MS = 10 * 365 * 24 * 60 * 60 * 1000;
 const OWNER_RENEW_BELOW_MS = 365 * 24 * 60 * 60 * 1000;
 
+/**
+ * Tester accounts: extra emails that get Pro WITHOUT a code change or an
+ * app update. They live in Firestore, in the document
+ *
+ *     config/proAccess   →   field  testers  (array of email strings)
+ *
+ * which you edit in the Firebase Console. Adding an email there gives
+ * that Google account Pro the next time the app talks to the server;
+ * removing it takes Pro away again (a real subscription they bought is
+ * kept). Clients can never read or write this document (see
+ * firestore.rules) — only this backend reads it.
+ */
+const TESTER_CACHE_MS = 60 * 1000;
+let testerCache = {emails: new Set(), loadedAt: 0};
+
+async function getTesterEmails() {
+  if (Date.now() - testerCache.loadedAt < TESTER_CACHE_MS) return testerCache.emails;
+  try {
+    const snap = await admin.firestore().collection("config").doc("proAccess").get();
+    const list = snap.exists && Array.isArray(snap.data().testers) ? snap.data().testers : [];
+    testerCache = {
+      emails: new Set(list
+        .filter((e) => typeof e === "string")
+        .map((e) => e.trim().toLowerCase())
+        .filter((e) => e.includes("@"))),
+      loadedAt: Date.now(),
+    };
+  } catch (e) {
+    // Keep the last good list if Firestore hiccups.
+    console.error("Could not load tester list:", e.message);
+    testerCache.loadedAt = Date.now();
+  }
+  return testerCache.emails;
+}
+
+function verifiedEmail(user) {
+  if (!user || typeof user.email !== "string") return null;
+  if (user.email_verified !== true) return null;
+  return user.email.trim().toLowerCase();
+}
+
 function isOwnerToken(user) {
-  if (!user || typeof user.email !== "string") return false;
-  if (user.email_verified !== true) return false;
-  return OWNER_EMAILS.includes(user.email.trim().toLowerCase());
+  const email = verifiedEmail(user);
+  return !!email && OWNER_EMAILS.includes(email);
+}
+
+async function isTesterToken(user) {
+  const email = verifiedEmail(user);
+  if (!email) return false;
+  return (await getTesterEmails()).has(email);
 }
 
 /**
- * Reads the SAME field PremiumProvider.grantPremium() writes via
- * CloudVaultService.updatePremiumExpiry() — users/{uid}.premiumExpiry — so
- * this is guaranteed to agree with what the app itself considers premium.
- * Attaches req.isPremium (bool) either way; use requirePremium() below to
- * hard-block non-premium requests, or just read req.isPremium for
- * different free/premium behavior in the same endpoint (e.g. translate).
+ * Reads users/{uid}.premiumExpiry — the field /verifySubscriptionPurchase
+ * writes after Google Play confirms a purchase, and which this function
+ * also writes for owner / tester accounts. Attaches req.isPremium (bool)
+ * and req.isOwner / req.isTester.
  *
  * ALSO attaches req.userTimezone — the IANA name (e.g. "Africa/Lagos")
- * that the client syncs via /updateTimezone. Every period-key computation
- * in this file (daily free limits, monthly translate limit, daily Coach
- * challenges) uses this instead of UTC, so "today" means "the user's
- * local today." A user in Lagos at 11 PM is no longer already past
- * midnight, and a user in Auckland at 1 AM is no longer still on
- * yesterday's counter. Falls back to UTC for legacy accounts that
- * haven't opened the app since the sync endpoint shipped — identical
- * behavior to before this change, so nothing can regress.
+ * that the client syncs via /updateTimezone, falling back to UTC.
  */
 async function attachPremiumStatus(req, res, next) {
   try {
@@ -70,24 +107,37 @@ async function attachPremiumStatus(req, res, next) {
     const expiry = data.premiumExpiry;
     req.isPremium = !!(expiry && expiry.toDate().getTime() > Date.now());
     req.isOwner = isOwnerToken(req.user);
+    req.isTester = !req.isOwner && await isTesterToken(req.user);
+    const granted = req.isOwner || req.isTester;
 
-    if (req.isOwner) {
-      // Owner/producer accounts are always Pro. Writing a far-future
-      // premiumExpiry (instead of only flipping req.isPremium) keeps every
-      // other reader of that field in agreement: budget.js, the Cloud
-      // Vault client code and the Storage/Firestore security rules.
+    if (granted) {
+      // Writing a far-future premiumExpiry (instead of only flipping
+      // req.isPremium) keeps every other reader of that field in
+      // agreement: budget.js, the app and the security rules.
       const msLeft = expiry ? expiry.toDate().getTime() - Date.now() : 0;
-      if (data.ownerAccess !== true || msLeft < OWNER_RENEW_BELOW_MS) {
+      const wantOwner = req.isOwner;
+      const wantTester = req.isTester;
+      if (data.ownerAccess !== wantOwner || data.testerAccess !== wantTester ||
+          msLeft < OWNER_RENEW_BELOW_MS) {
         await userRef.set({
-          ownerAccess: true,
+          ownerAccess: wantOwner,
+          testerAccess: wantTester,
           premiumExpiry: admin.firestore.Timestamp.fromMillis(Date.now() + OWNER_GRANT_MS),
           planId: data.planId === "monthly" || data.planId === "annual" ? data.planId : "annual",
         }, {merge: true});
       }
       req.isPremium = true;
-    } else if (data.ownerAccess === true) {
-      // The flag is only ever valid for the allow-listed emails.
-      await userRef.set({ownerAccess: false}, {merge: true});
+    } else if (data.ownerAccess === true || data.testerAccess === true) {
+      // Access was removed (email taken off the list). Drop the granted
+      // expiry, but keep a real subscription if they bought one.
+      const sub = data.subscriptionExpiry;
+      const subActive = !!(sub && sub.toDate().getTime() > Date.now());
+      await userRef.set({
+        ownerAccess: false,
+        testerAccess: false,
+        premiumExpiry: subActive ? sub : admin.firestore.FieldValue.delete(),
+      }, {merge: true});
+      req.isPremium = subActive;
     }
 
     const tz = typeof data.timezone === "string" ? data.timezone : "";
@@ -96,6 +146,7 @@ async function attachPremiumStatus(req, res, next) {
   } catch (e) {
     console.error("Premium status check failed:", e.message);
     req.isOwner = isOwnerToken(req.user);
+    req.isTester = false;
     req.isPremium = req.isOwner;
     req.userTimezone = "UTC";
     next();
@@ -245,6 +296,7 @@ async function checkBrandingAllowance(uid, isPremium, tz = "UTC") {
 module.exports = {
   OWNER_EMAILS,
   isOwnerToken,
+  isTesterToken,
   requireAuth,
   attachPremiumStatus,
   requirePremium,

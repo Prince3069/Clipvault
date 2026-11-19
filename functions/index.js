@@ -272,7 +272,11 @@ app.get("/health", (req, res) => {
 
 // ─── Premium status ─────────────────────────────────────────────────────
 app.get("/verifyPremium", requireAuth, attachPremiumStatus, (req, res) => {
-  res.json({isPremium: req.isPremium, isOwner: req.isOwner === true});
+  res.json({
+    isPremium: req.isPremium,
+    isOwner: req.isOwner === true,
+    isTester: req.isTester === true,
+  });
 });
 
 // ─── Timezone sync ──────────────────────────────────────────────────────
@@ -755,6 +759,9 @@ app.post("/verifySubscriptionPurchase", requireAuth, async (req, res) => {
     await db.collection("users").doc(req.user.uid).set(
       {
         premiumExpiry: admin.firestore.Timestamp.fromDate(expiryTime),
+        // Kept separately so a real subscription survives if owner /
+        // tester access is later removed (see middleware.js).
+        subscriptionExpiry: admin.firestore.Timestamp.fromDate(expiryTime),
         planId,
         lastVerifiedAt: admin.firestore.FieldValue.serverTimestamp(),
       },

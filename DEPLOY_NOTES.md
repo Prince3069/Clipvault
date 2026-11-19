@@ -55,7 +55,23 @@ The list lives in three places — keep them identical if you ever change it:
 The email must be verified (Google sign-in always is). An unverified
 email/password account using one of these addresses does NOT get Pro.
 
-## 4. New / changed API endpoints
+## 4. Testers (give Pro to any Google account, no app update)
+
+1. Firebase Console → Firestore Database → **Start collection**
+   - Collection ID: `config`
+   - Document ID: `proAccess`
+   - Field: `testers`, type **array**
+2. Add each tester's Gmail address as a **string** item in that array.
+3. The tester signs in to the app with **Google** using that address and
+   restarts the app. Pro turns on within about a minute.
+
+To remove someone, delete their address from the array. Their Pro access
+ends the next time the app talks to the server (a subscription they really
+bought is kept). Testers get a $5/month AI allowance.
+
+Owner accounts stay hard-coded (section 3) and never need this list.
+
+## 5. New / changed API endpoints
 
 | Endpoint | Change |
 |---|---|
