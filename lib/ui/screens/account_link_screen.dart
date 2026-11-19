@@ -13,6 +13,8 @@
 // That framing is what actually gets people to complete the flow.
 
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import '../../providers/premium_provider.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import '../../services/account_service.dart';
 import '../themes/app_theme.dart';
@@ -144,10 +146,10 @@ class _AccountLinkScreenState extends State<AccountLinkScreen> {
           ),
         ),
         content: Text(
-          '$email is already linked to another MediaNest account.\n\n'
-          'Sign in to that account instead? Your current anonymous '
-          'library, downloads, and any Pro subscription on THIS device '
-          'will not carry over — they stay under the anonymous account.',
+          '$email already has a MediaNest account.\n\n'
+          'Sign in to it? Everything saved in that account — Cloud Vault '
+          'files, Pro, coach progress — comes back. Anything you did while '
+          'signed out (on this phone) stays behind.',
           style: const TextStyle(
             color: AppColors.textSecondary,
             height: 1.5,
@@ -197,6 +199,12 @@ class _AccountLinkScreenState extends State<AccountLinkScreen> {
   }
 
   void _onSuccess(String email) {
+    // Pro for this account is checked again right away, so Pro features
+    // and Cloud Vault files show without restarting the app.
+    Provider.of<PremiumProvider>(context, listen: false).refreshEntitlement();
+    if (_account.needsEmailVerification) {
+      email = '$email — check your inbox to confirm it';
+    }
     Navigator.of(context).pop(true);
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -206,7 +214,7 @@ class _AccountLinkScreenState extends State<AccountLinkScreen> {
             const SizedBox(width: 10),
             Expanded(
               child: Text(
-                'You\'re all set. $email is now linked.',
+                'You\'re signed in: $email',
                 style: const TextStyle(color: Colors.white),
               ),
             ),

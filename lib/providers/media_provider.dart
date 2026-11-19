@@ -42,8 +42,9 @@ class MediaProvider extends ChangeNotifier {
     try {
       final ps = PermissionService();
       final state = await ps.getPermissionState();
-      final statusFolderAccess =
-          await WhatsAppService().hasStatusFolderAccess();
+      final business = await WhatsAppService.prefersBusiness();
+      final statusFolderAccess = await WhatsAppService()
+          .hasStatusFolderAccess(isBusinessWhatsApp: business);
       // Allow if normal storage, all-files, or the persisted WhatsApp SAF tree is available.
       _hasPermissions =
           state.canAccessFiles || state.manageStorage || statusFolderAccess;
@@ -61,9 +62,11 @@ class MediaProvider extends ChangeNotifier {
     notifyListeners();
 
     try {
-      final hasStatusAccess = await WhatsAppService().hasStatusFolderAccess();
+      final business = await WhatsAppService.prefersBusiness();
+      final hasStatusAccess = await WhatsAppService()
+          .hasStatusFolderAccess(isBusinessWhatsApp: business);
       if (hasStatusAccess) {
-        await refreshWhatsAppStatuses();
+        await refreshWhatsAppStatuses(isBusiness: business);
       } else {
         _whatsappImages.clear();
         _whatsappVideos.clear();
@@ -132,90 +135,98 @@ class MediaProvider extends ChangeNotifier {
     }
   }
 
-  /// Load previously downloaded files
+  /// Load previously downloaded files.
+  ///
+  /// Two sources are combined:
+  ///  1. MediaStore rows (fast, works without broad storage permission —
+  ///     but only lists files THIS install of the app created).
+  ///  2. A scan of the folders downloads are saved into. This is what finds
+  ///     files saved before a reinstall / "Clear data", which MediaStore no
+  ///     longer reports as ours. Downloads are saved under
+  ///     Download/MediaNest/<Platform>/ — the old code only scanned the
+  ///     previous brand names (ClipVaults, SaveIt), so after a reinstall the
+  ///     library came up empty even though every file was still there.
   Future<void> _loadDownloadedFiles() async {
     try {
-      // Modern Android owns public downloads through MediaStore. Query those
-      // rows first so the Library survives process restarts and does not depend
-      // on raw directory traversal or broad storage permission.
-      final indexedRows = await NativeBridge.queryClipVaultMedia();
-      if (indexedRows.isNotEmpty) {
-        final indexed = indexedRows
-            .map((row) {
-              final path = (row['path'] as String?) ?? '';
-              final fileName = (row['fileName'] as String?) ?? 'media';
-              final createdMillis = (row['createdAt'] as num?)?.toInt() ?? 0;
-              return MediaFile(
-                id: (row['id'] as String?) ?? path.hashCode.toString(),
-                path: path,
-                fileName: fileName,
-                fileSize: (row['fileSize'] as num?)?.toInt() ?? 0,
-                isVideo: row['isVideo'] == true,
-                sourceApp: (row['sourceApp'] as String?) ??
-                    _detectPlatformFromPath(path),
-                createdAt: createdMillis > 0
-                    ? DateTime.fromMillisecondsSinceEpoch(createdMillis)
-                    : DateTime.now(),
-                viewedAt: createdMillis > 0
-                    ? DateTime.fromMillisecondsSinceEpoch(createdMillis)
-                    : DateTime.now(),
-                isDownloaded: true,
-              );
-            })
-            .where((item) => item.path.isNotEmpty)
-            .toList();
-        indexed.sort((a, b) => b.createdAt.compareTo(a.createdAt));
-        _allMedia
-          ..clear()
-          ..addAll(indexed);
-        notifyListeners();
-        return;
+      final byPath = <String, MediaFile>{};
+
+      try {
+        final indexedRows = await NativeBridge.queryClipVaultMedia();
+        for (final row in indexedRows) {
+          final path = (row['path'] as String?) ?? '';
+          if (path.isEmpty) continue;
+          final fileName = (row['fileName'] as String?) ?? 'media';
+          final createdMillis = (row['createdAt'] as num?)?.toInt() ?? 0;
+          final created = createdMillis > 0
+              ? DateTime.fromMillisecondsSinceEpoch(createdMillis)
+              : DateTime.now();
+          byPath[path] = MediaFile(
+            id: (row['id'] as String?) ?? path.hashCode.toString(),
+            path: path,
+            fileName: fileName,
+            fileSize: (row['fileSize'] as num?)?.toInt() ?? 0,
+            isVideo: row['isVideo'] == true,
+            sourceApp: (row['sourceApp'] as String?) ??
+                _detectPlatformFromPath(path),
+            createdAt: created,
+            viewedAt: created,
+            isDownloaded: true,
+          );
+        }
+      } catch (e) {
+        print('MediaStore query failed (falling back to folder scan): $e');
       }
 
       const downloadBases = [
+        '/storage/emulated/0/Download/MediaNest',
+        // Backward compatibility for files saved by older builds.
         '/storage/emulated/0/Download/ClipVaults',
-        // Backward compatibility for files saved by older ClipVault builds.
         '/storage/emulated/0/Download/SaveIt',
       ];
-      final entities = <FileSystemEntity>[];
       for (final base in downloadBases) {
-        final dir = Directory(base);
-        if (await dir.exists()) {
-          entities.addAll(dir.listSync(recursive: true));
+        try {
+          final dir = Directory(base);
+          if (!await dir.exists()) continue;
+          await for (final entity
+              in dir.list(recursive: true, followLinks: false)) {
+            if (entity is! File) continue;
+            final path = entity.path;
+            if (byPath.containsKey(path) || !_isMediaFile(path)) continue;
+            try {
+              final stat = await entity.stat();
+              if (stat.size <= 0) continue;
+              byPath[path] = MediaFile(
+                id: path.hashCode.toString(),
+                path: path,
+                fileName: path.split('/').last,
+                fileSize: stat.size,
+                isVideo: _isVideoFile(path),
+                sourceApp: _detectPlatformFromPath(path),
+                createdAt: stat.modified,
+                viewedAt: stat.accessed,
+                isDownloaded: true,
+              );
+            } catch (_) {
+              // File vanished or is unreadable — skip it.
+            }
+          }
+        } catch (e) {
+          // Needs the photos/videos permission after a reinstall.
+          print('Could not scan $base: $e');
         }
       }
-      if (entities.isEmpty) return;
-      final downloaded = <MediaFile>[];
 
-      for (final entity in entities) {
-        if (entity is File && _isMediaFile(entity.path)) {
-          final stat = entity.statSync();
-          final name = entity.path.split('/').last;
-          downloaded.add(MediaFile(
-            id: entity.path.hashCode.toString(),
-            path: entity.path,
-            fileName: name,
-            fileSize: stat.size,
-            isVideo: _isVideoFile(entity.path),
-            sourceApp: _detectPlatformFromPath(entity.path),
-            createdAt: stat.modified,
-            viewedAt: stat.accessed,
-            isDownloaded: true,
-          ));
-        }
-      }
-
-      downloaded.sort((a, b) => b.createdAt.compareTo(a.createdAt));
-
-      _allMedia.clear();
-      _allMedia.addAll(downloaded);
+      final all = byPath.values.toList()
+        ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      _allMedia
+        ..clear()
+        ..addAll(all);
       notifyListeners();
     } catch (e) {
       print('Error loading downloaded files: $e');
     }
   }
 
-  /// Import a video or image received from Android’s Sharesheet.
   Future<bool> importSharedMedia(String sourcePath) async {
     try {
       final source = File(sourcePath);

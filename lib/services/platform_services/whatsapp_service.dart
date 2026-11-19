@@ -3,6 +3,7 @@
 
 import 'dart:io';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../../models/status_item.dart';
 
 class WhatsAppService {
@@ -26,6 +27,26 @@ class WhatsAppService {
     '/storage/emulated/0/Android/media/com.whatsapp.w4b/WhatsApp Business/Media/.Statuses',
     '/sdcard/Android/media/com.whatsapp.w4b/WhatsApp Business/Media/.Statuses',
   ];
+
+  static const String _kPrefersBusiness = 'whatsapp_prefers_business';
+
+  /// Whether the person uses WhatsApp Business (remembered from the
+  /// Personal / Business choice on the Status screen).
+  static Future<bool> prefersBusiness() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      return prefs.getBool(_kPrefersBusiness) ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static Future<void> setPrefersBusiness(bool value) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_kPrefersBusiness, value);
+    } catch (_) {}
+  }
 
   Future<bool> hasStatusFolderAccess({
     bool isBusinessWhatsApp = false,

@@ -9,6 +9,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:provider/provider.dart';
 import '../../providers/settings_provider.dart';
 import '../../providers/premium_provider.dart';
+import '../../providers/cloud_vault_provider.dart';
 import '../../services/account_service.dart';
 import '../../services/permission_service.dart';
 import '../themes/app_theme.dart';
@@ -179,8 +180,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     // Rebuild when auth changes — linkWithCredential replaces currentUser,
     // and there's no ChangeNotifier emitting for that, so listen to the
     // stream instead of relying on setState alone.
+    // userChanges (not authStateChanges) so the section also updates when
+    // the email gets verified, not only on sign-in / sign-out.
     return StreamBuilder<User?>(
-      stream: FirebaseAuth.instance.authStateChanges(),
+      stream: FirebaseAuth.instance.userChanges(),
       builder: (context, snapshot) {
         final user = snapshot.data ?? FirebaseAuth.instance.currentUser;
         final isAnonymous = user?.isAnonymous ?? true;
@@ -225,12 +228,156 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     onTap: _openLinkScreen,
                   ),
                 ],
+                if (!isAnonymous && _account.needsEmailVerification) ...[
+                  _div(),
+                  _verifyEmailRow(email),
+                ],
+                if (!isAnonymous) ...[
+                  _div(),
+                  _tile(
+                    icon: Icons.logout_rounded,
+                    color: AppColors.error,
+                    title: 'Sign out',
+                    sub: 'Your files stay saved and come back when you sign in',
+                    onTap: _confirmSignOut,
+                  ),
+                ],
               ]),
             ),
           ],
         );
       },
     );
+  }
+
+  bool _verifyBusy = false;
+
+  Widget _verifyEmailRow(String email) {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppColors.warning.withValues(alpha: 0.07),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.warning.withValues(alpha: 0.25)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.mark_email_unread_rounded,
+                  color: AppColors.warning, size: 18),
+              SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Confirm your email',
+                  style: TextStyle(
+                    color: AppColors.textPrimary,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'We sent a link to $email. Tap it, then come back and press '
+            '"I\'ve confirmed". Until then, Pro access given to this email '
+            'stays off. Check your spam folder too.',
+            style: const TextStyle(
+              color: AppColors.textSecondary,
+              fontSize: 12,
+              height: 1.4,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 4,
+            children: [
+              ElevatedButton(
+                onPressed: _verifyBusy ? null : _checkVerified,
+                child: Text(_verifyBusy ? 'Checking...' : 'I\'ve confirmed'),
+              ),
+              TextButton(
+                onPressed: _verifyBusy ? null : _resendVerification,
+                child: const Text('Resend email'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _checkVerified() async {
+    setState(() => _verifyBusy = true);
+    final ok = await _account.refreshEmailVerification();
+    if (ok && mounted) {
+      // The account is now verified: re-check Pro (owner / tester
+      // access needs a verified email) and reload the Cloud Vault.
+      await Provider.of<PremiumProvider>(context, listen: false)
+          .refreshEntitlement();
+      if (mounted) {
+        await Provider.of<CloudVaultProvider>(context, listen: false).init();
+      }
+    }
+    if (!mounted) return;
+    setState(() => _verifyBusy = false);
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(ok
+          ? 'Email confirmed.'
+          : 'Not confirmed yet. Tap the link in the email first.'),
+      backgroundColor: ok ? AppColors.success : AppColors.warning,
+      behavior: SnackBarBehavior.floating,
+    ));
+  }
+
+  Future<void> _resendVerification() async {
+    setState(() => _verifyBusy = true);
+    final error = await _account.sendVerificationEmail();
+    if (!mounted) return;
+    setState(() => _verifyBusy = false);
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(error ?? 'Confirmation email sent.'),
+      behavior: SnackBarBehavior.floating,
+    ));
+  }
+
+  Future<void> _confirmSignOut() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text('Sign out?'),
+        content: const Text(
+          'Your Cloud Vault files, Pro subscription, coach progress and AI '
+          'results stay saved in your account. Sign in again with the same '
+          'Google account or email to get them back.',
+          style: TextStyle(color: AppColors.textSecondary, height: 1.5),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Sign out'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    await _account.signOut();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+      content: Text('Signed out. Use "Save your account" to sign back in.'),
+      behavior: SnackBarBehavior.floating,
+    ));
   }
 
   /// A deliberately prominent (but dismissible-by-navigation, not

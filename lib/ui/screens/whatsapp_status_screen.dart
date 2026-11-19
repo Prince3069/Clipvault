@@ -51,13 +51,43 @@ class _WhatsAppStatusScreenState extends State<WhatsAppStatusScreen>
     }
   }
 
+  bool _modeLoaded = false;
+
   Future<void> _checkAndLoad() async {
-    final folderAccess = await WhatsAppService().hasStatusFolderAccess(
+    final service = WhatsAppService();
+    if (!_modeLoaded) {
+      _modeLoaded = true;
+      final saved = await WhatsAppService.prefersBusiness();
+      if (mounted) setState(() => _showBusiness = saved);
+    }
+    var folderAccess = await service.hasStatusFolderAccess(
       isBusinessWhatsApp: _showBusiness,
     );
+    // No access for the selected app, but access exists for the other one
+    // (e.g. someone with only WhatsApp Business who never flipped the
+    // switch): use the one that works.
+    if (!folderAccess) {
+      final other = await service.hasStatusFolderAccess(
+        isBusinessWhatsApp: !_showBusiness,
+      );
+      if (other) {
+        folderAccess = true;
+        if (mounted) setState(() => _showBusiness = !_showBusiness);
+        await WhatsAppService.setPrefersBusiness(_showBusiness);
+      }
+    }
     if (!mounted) return;
     setState(() => _hasStatusFolderAccess = folderAccess);
     if (folderAccess) await _loadStatuses();
+  }
+
+  Future<void> _setBusiness(bool business) async {
+    if (_isLoading || business == _showBusiness) return;
+    setState(() => _showBusiness = business);
+    await WhatsAppService.setPrefersBusiness(business);
+    // Re-check access for THIS app — Personal and Business are separate
+    // folders, each needing its own one-time grant.
+    await _checkAndLoad();
   }
 
   Future<void> _requestStatusFolderAccess() async {
@@ -103,7 +133,8 @@ class _WhatsAppStatusScreenState extends State<WhatsAppStatusScreen>
               _step('1', 'Android'),
               _step('2', 'media'),
               _step('3', _showBusiness ? 'com.whatsapp.w4b' : 'com.whatsapp'),
-              _step('4', 'WhatsApp'),
+              // WhatsApp Business names this folder differently.
+              _step('4', _showBusiness ? 'WhatsApp Business' : 'WhatsApp'),
               _step('5', 'Media  ← select this one, the folder itself'),
               const SizedBox(height: 8),
               const Text(
@@ -295,10 +326,7 @@ class _WhatsAppStatusScreenState extends State<WhatsAppStatusScreen>
                 ),
               ),
               GestureDetector(
-                onTap: () {
-                  setState(() => _showBusiness = !_showBusiness);
-                  _loadStatuses();
-                },
+                onTap: () => _setBusiness(!_showBusiness),
                 child: AnimatedContainer(
                   duration: const Duration(milliseconds: 200),
                   padding: const EdgeInsets.symmetric(
@@ -756,9 +784,60 @@ class _WhatsAppStatusScreenState extends State<WhatsAppStatusScreen>
 
   // ─── Permission screen ────────────────────────────────────────────────────
 
+  Widget _appChoice(String label, bool business) {
+    final selected = _showBusiness == business;
+    return GestureDetector(
+      onTap: () => _setBusiness(business),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 6),
+        decoration: BoxDecoration(
+          color: selected
+              ? AppColors.whatsapp.withValues(alpha: 0.12)
+              : AppColors.surface,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: selected ? AppColors.whatsapp : AppColors.border,
+            width: selected ? 1.6 : 1,
+          ),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              selected
+                  ? Icons.radio_button_checked_rounded
+                  : Icons.radio_button_unchecked_rounded,
+              size: 16,
+              color: selected ? AppColors.whatsapp : AppColors.textMuted,
+            ),
+            const SizedBox(width: 6),
+            Flexible(
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  style: TextStyle(
+                    color: selected
+                        ? AppColors.textPrimary
+                        : AppColors.textSecondary,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildPermissionScreen() {
     return Center(
-      child: Padding(
+      // Scrolls on small phones / large text instead of overflowing.
+      child: SingleChildScrollView(
         padding: const EdgeInsets.all(28),
         child: Container(
           padding: const EdgeInsets.fromLTRB(22, 26, 22, 22),
@@ -802,7 +881,7 @@ class _WhatsAppStatusScreenState extends State<WhatsAppStatusScreen>
               ),
               const SizedBox(height: 10),
               const Text(
-                'View a WhatsApp status first, then return to ClipVault.\nGrant access once and this screen will refresh automatically.',
+                'View a WhatsApp status first, then return to MediaNest.\nGrant access once and this screen will refresh automatically.',
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   color: AppColors.textSecondary,
@@ -810,7 +889,24 @@ class _WhatsAppStatusScreenState extends State<WhatsAppStatusScreen>
                   height: 1.5,
                 ),
               ),
-              const SizedBox(height: 20),
+              const SizedBox(height: 18),
+              const Text(
+                'Which WhatsApp do you use?',
+                style: TextStyle(
+                  color: AppColors.textPrimary,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(child: _appChoice('WhatsApp', false)),
+                  const SizedBox(width: 8),
+                  Expanded(child: _appChoice('WhatsApp Business', true)),
+                ],
+              ),
+              const SizedBox(height: 16),
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton.icon(
